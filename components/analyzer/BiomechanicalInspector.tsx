@@ -2,12 +2,13 @@
 
 import React from 'react';
 import { BiomechanicalTelemetry, CheckpointItem } from '@/types/video-search';
+import { AgenticInsight, BiomechanicalFlaw } from '@/types/sparring-analysis';
 import { 
   Activity, 
   ShieldCheck, 
   AlertTriangle, 
   CheckCircle2, 
-  Info, 
+  ShieldAlert,
   Compass, 
   Gauge, 
   Zap, 
@@ -17,13 +18,19 @@ import {
 interface BiomechanicalInspectorProps {
   telemetry: BiomechanicalTelemetry;
   techniqueName: string;
+  insights?: AgenticInsight[];
+  flaws?: BiomechanicalFlaw[];
   onSeekToPhase?: (timestamp: number) => void;
+  onSeekToInsight?: (timestampSeconds: number) => void;
 }
 
 export const BiomechanicalInspector: React.FC<BiomechanicalInspectorProps> = ({
   telemetry,
   techniqueName,
+  insights,
+  flaws,
   onSeekToPhase,
+  onSeekToInsight,
 }) => {
   const getStatusIcon = (status: CheckpointItem['status']) => {
     switch (status) {
@@ -47,6 +54,14 @@ export const BiomechanicalInspector: React.FC<BiomechanicalInspectorProps> = ({
     }
   };
 
+  const handleSeek = (sec: number) => {
+    if (onSeekToInsight) {
+      onSeekToInsight(sec);
+    } else if (onSeekToPhase) {
+      onSeekToPhase(sec);
+    }
+  };
+
   return (
     <div className="rounded-3xl border border-zinc-800 bg-[#121216] p-5 flex flex-col gap-4 shadow-xl">
       {/* Header */}
@@ -54,7 +69,7 @@ export const BiomechanicalInspector: React.FC<BiomechanicalInspectorProps> = ({
         <div className="flex items-center gap-2">
           <Activity className="h-5 w-5 text-red-500" />
           <h3 className="font-bold text-sm text-white font-mono tracking-tight">
-            Biomechanical Telemetry & Angles
+            Biomechanical Telemetry &amp; Angles
           </h3>
         </div>
         <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-red-950/80 border border-red-800/80 text-red-300">
@@ -130,7 +145,7 @@ export const BiomechanicalInspector: React.FC<BiomechanicalInspectorProps> = ({
       {telemetry.keyPhases && telemetry.keyPhases.length > 0 && (
         <div className="rounded-2xl border border-zinc-800/80 bg-zinc-950/50 p-3">
           <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 block mb-2">
-            Technique Micro-Phases (Jump &amp; Analyze):
+            Technique Micro-Phases (Click to Jump):
           </span>
           <div className="flex flex-wrap gap-2">
             {telemetry.keyPhases.map((phase, idx) => (
@@ -142,6 +157,62 @@ export const BiomechanicalInspector: React.FC<BiomechanicalInspectorProps> = ({
                 <span className="text-red-500 text-[10px]">{phase.timestamp.toFixed(1)}s</span>
                 <span>{phase.name}</span>
               </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Interactive Flaws & Insights if passed */}
+      {((insights && insights.length > 0) || (flaws && flaws.length > 0)) && (
+        <div className="rounded-2xl border border-amber-900/50 bg-amber-950/10 p-3 flex flex-col gap-2">
+          <span className="text-xs font-mono font-bold uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+            <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
+            Detected Flaws &amp; Biomechanical Vulnerabilities (Click to Seek)
+          </span>
+
+          <div className="space-y-2 mt-1">
+            {insights?.map((ins) => (
+              <div
+                key={ins.id}
+                onClick={() => handleSeek(ins.timestampMs / 1000)}
+                className="p-2.5 rounded-xl border border-zinc-800/90 bg-zinc-950/80 hover:border-red-500 cursor-pointer transition-all flex flex-col gap-1"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="px-1.5 py-0.5 rounded bg-zinc-900 text-red-400 font-mono text-[10px] font-bold">
+                      {(ins.timestampMs / 1000).toFixed(1)}s
+                    </span>
+                    <span className="font-bold font-mono text-zinc-200 text-xs">{ins.title}</span>
+                  </div>
+                  <span className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-red-950 text-red-300 border border-red-800">
+                    {ins.severity}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-0.5">{ins.observation}</p>
+                <p className="text-[10px] text-emerald-400 font-mono">Correction: {ins.correction}</p>
+              </div>
+            ))}
+
+            {!insights && flaws?.map((flaw) => (
+              <div
+                key={flaw.id}
+                onClick={() => handleSeek(flaw.timestampSeconds)}
+                className="p-2.5 rounded-xl border border-zinc-800/90 bg-zinc-950/80 hover:border-red-500 cursor-pointer transition-all flex flex-col gap-1"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="px-1.5 py-0.5 rounded bg-zinc-900 text-red-400 font-mono text-[10px] font-bold">
+                      {flaw.timestampSeconds.toFixed(1)}s
+                    </span>
+                    <span className="font-bold font-mono text-zinc-200 text-xs">{flaw.title}</span>
+                  </div>
+                  <span className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-red-950 text-red-300 border border-red-800">
+                    {flaw.severity}
+                  </span>
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-0.5">{flaw.observation}</p>
+                <p className="text-[10px] text-emerald-400 font-mono">Correction: {flaw.correction}</p>
+              </div>
             ))}
           </div>
         </div>

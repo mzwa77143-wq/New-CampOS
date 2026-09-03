@@ -1,11 +1,16 @@
 import { GoogleGenerativeAI, Part } from '@google/generative-ai';
 import { 
   SparringUploadMetadata, 
-  AiSparringFeedback, 
+  SparringAnalysisResponse,
+  TacticalSequence,
+  BiomechanicalMetric,
+  AgenticInsight,
+  ActionItem,
+  BiomechanicalFlaw,
+  KeyMoment,
+  PrescribedDrill
 } from '@/types/sparring-analysis';
 import { generateAiSparringFeedback } from './sparring-analyzer';
-
-const DEFAULT_API_KEY = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6I6i6BKYwMLhAyuWJ0a0pygEoedTyYfy6-DASP07f-SmQ';
 
 // Cascade through models to prevent 503 high-demand spikes
 const CANDIDATE_MODELS = [
@@ -19,11 +24,11 @@ export async function analyzeSparringWithGemini(
   metadata: SparringUploadMetadata,
   actualDurationSeconds: number = 30,
   framesBase64?: string[]
-): Promise<AiSparringFeedback> {
-  const apiKey = process.env.GEMINI_API_KEY || DEFAULT_API_KEY;
+): Promise<SparringAnalysisResponse> {
+  const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    console.warn('No Gemini API key available, using local combat engine fallback');
+    console.warn('GEMINI_API_KEY not configured in environment or GitHub Secrets. Using local combat engine fallback.');
     return {
       ...generateAiSparringFeedback(metadata, actualDurationSeconds),
       source: 'CampOS Combat Engine (Offline Fallback)',
@@ -35,13 +40,15 @@ export async function analyzeSparringWithGemini(
   else if (metadata.fighterId === 'f3') fighterName = 'Valentina Santos';
   else if (metadata.fighterId === 'f4') fighterName = 'Justin Vance';
 
+  const durationMs = actualDurationSeconds * 1000;
+
   const promptText = `You are an elite UFC championship MMA fight camp coach and sports biomechanics expert.
 Analyze this sparring round:
 - Fighter: ${fighterName}
 - Camp Round: Round ${metadata.roundNumber || 1}
 - Sparring Partner Style: ${metadata.sparringPartnerStyle || 'Mixed Martial Artist'}
 - Session Intensity: ${metadata.intensity}
-- Round Duration: ${actualDurationSeconds} seconds
+- Round Duration: ${actualDurationSeconds} seconds (${durationMs} ms)
 - Footage File: ${metadata.videoFileName || 'Sparring_Round.mp4'}
 
 Evaluate the footage and provide an authoritative technical critique.
@@ -57,82 +64,70 @@ Return ONLY a valid JSON object matching this exact format:
     "takedownDefensePct": 85,
     "cageControlSeconds": 18
   },
-  "flaws": [
+  "tacticalSequences": [
     {
-      "id": "flaw_1",
-      "timestampSeconds": 4.5,
-      "title": "Short descriptive title of technical flaw",
+      "id": "seq_1",
+      "startTimestampMs": 3500,
+      "endTimestampMs": 8200,
+      "sequenceName": "Calf Kick & Angle Disengage",
+      "dominantDiscipline": "Striking",
+      "initiator": "fighter",
+      "positionalTransition": "Open Space -> Pocket Exchange -> Angle Pivot",
+      "outcome": "Clean strike landed",
+      "description": "Timed lead foot placement with low kick and pivoted off centerline"
+    }
+  ],
+  "biomechanicalMetrics": [
+    {
+      "id": "bm_1",
+      "metricName": "Thoracic Spine Flexion",
+      "measuredValue": 44,
+      "optimalRangeMin": 15,
+      "optimalRangeMax": 30,
+      "unit": "deg",
+      "jointOrSegment": "Thoracic Spine",
+      "status": "warning",
+      "timestampMs": 4500,
+      "notes": "Forward overextension on jab"
+    }
+  ],
+  "insights": [
+    {
+      "id": "ins_1",
+      "category": "biomechanical",
+      "title": "Dropped Rear Hand on Lead Hook",
+      "observation": "Right hand dropped to collarbone level while delivering lead hook",
+      "rootCause": "Absence of latissimus engagement to stabilize guard during torso rotation",
+      "correction": "Glue right thumb to zygomatic arch throughout rotational hook recovery",
+      "confidenceScore": 0.94,
+      "timestampMs": 4500,
+      "endTimestampMs": 7200,
       "severity": "critical",
-      "observation": "What the fighter did incorrectly",
-      "correction": "Exact biomechanical correction",
-      "jointAngleImpact": "Specific degrees or biomechanical deviation"
+      "impactMetric": "Guard dropped 25 degrees below protective line"
     },
     {
-      "id": "flaw_2",
-      "timestampSeconds": 12.0,
-      "title": "Second flaw title",
+      "id": "ins_2",
+      "category": "tactical",
+      "title": "Linear Retreat into Fence Vulnerability",
+      "observation": "Backed straight up into fence when partner blitzed with 1-2 combination",
+      "rootCause": "Lack of 45-degree angle pivot off lead foot upon disengaging",
+      "correction": "Step lead foot first on advance, pivot 45 degrees to exit partner power corridor",
+      "confidenceScore": 0.91,
+      "timestampMs": 14500,
+      "endTimestampMs": 18200,
       "severity": "warning",
-      "observation": "Observation",
-      "correction": "Correction",
-      "jointAngleImpact": "Impact"
-    },
-    {
-      "id": "flaw_3",
-      "timestampSeconds": 24.5,
-      "title": "Third flaw title",
-      "severity": "advisory",
-      "observation": "Observation",
-      "correction": "Correction",
-      "jointAngleImpact": "Impact"
+      "impactMetric": "Lost 8 feet of cage space in linear retreat"
     }
   ],
-  "keyMoments": [
+  "actionItems": [
     {
-      "id": "km_1",
-      "timestampSeconds": 3.2,
-      "type": "positive",
-      "title": "Calf Kick Timing on Stance Switch",
-      "description": "Exchange description",
-      "tag": "Striking IQ"
-    },
-    {
-      "id": "km_2",
-      "timestampSeconds": 15.0,
-      "type": "positive",
-      "title": "Cage Wrestling Reversal",
-      "description": "Exchange description",
-      "tag": "Cage Wrestling"
-    },
-    {
-      "id": "km_3",
-      "timestampSeconds": 28.0,
-      "type": "negative",
-      "title": "Counter Absorbed",
-      "description": "Exchange description",
-      "tag": "Defensive Lag"
-    }
-  ],
-  "prescribedDrills": [
-    {
-      "id": "drill_1",
-      "title": "Corrective Drill Name",
+      "id": "action_1",
+      "title": "Chin-Tuck Hook Repetitions",
+      "priority": "high",
+      "targetFlaw": "Dropped rear hand guard",
+      "prescribedDrill": "Tennis Ball Chin-Tuck Hook Drill",
       "setsAndReps": "4 rounds x 3 minutes",
-      "targetIssue": "What this fixes",
-      "coachInstructions": "How to perform drill"
-    },
-    {
-      "id": "drill_2",
-      "title": "Second Corrective Drill",
-      "setsAndReps": "5 sets x 10 reps",
-      "targetIssue": "Target issue",
-      "coachInstructions": "How to perform drill"
-    },
-    {
-      "id": "drill_3",
-      "title": "Third Corrective Drill",
-      "setsAndReps": "3 rounds x 4 minutes",
-      "targetIssue": "Target issue",
-      "coachInstructions": "How to perform drill"
+      "coachInstructions": "Hold tennis ball under right chin while delivering lead hooks on heavy bag"
     }
   ]
 }`;
@@ -168,10 +163,57 @@ Return ONLY a valid JSON object matching this exact format:
           .trim();
 
         const parsed = JSON.parse(cleaned);
+
+        const tacticalSequences: TacticalSequence[] = Array.isArray(parsed.tacticalSequences)
+          ? parsed.tacticalSequences
+          : [];
+
+        const biomechanicalMetrics: BiomechanicalMetric[] = Array.isArray(parsed.biomechanicalMetrics)
+          ? parsed.biomechanicalMetrics
+          : [];
+
+        const insights: AgenticInsight[] = Array.isArray(parsed.insights)
+          ? parsed.insights
+          : [];
+
+        const actionItems: ActionItem[] = Array.isArray(parsed.actionItems)
+          ? parsed.actionItems
+          : [];
+
+        // Legacy compatibility mappings
+        const flaws: BiomechanicalFlaw[] = insights.map((ins, idx) => ({
+          id: ins.id || `flaw_${idx + 1}`,
+          timestampSeconds: parseFloat(((ins.timestampMs || 4000) / 1000).toFixed(1)),
+          title: ins.title,
+          severity: ins.severity || 'warning',
+          observation: ins.observation,
+          correction: ins.correction,
+          jointAngleImpact: ins.impactMetric,
+        }));
+
+        const keyMoments: KeyMoment[] = tacticalSequences.map((seq, idx) => ({
+          id: seq.id || `km_${idx + 1}`,
+          timestampSeconds: parseFloat(((seq.startTimestampMs || 3000) / 1000).toFixed(1)),
+          type: 'positive',
+          title: seq.sequenceName,
+          description: seq.description || seq.outcome,
+          tag: seq.dominantDiscipline || 'Tactics',
+        }));
+
+        const prescribedDrills: PrescribedDrill[] = actionItems.map((act, idx) => ({
+          id: act.id || `drill_${idx + 1}`,
+          title: act.prescribedDrill || act.title,
+          setsAndReps: act.setsAndReps,
+          targetIssue: act.targetFlaw,
+          coachInstructions: act.coachInstructions,
+        }));
+
         return {
           sessionId: `gemini_${modelName}_${Date.now()}`,
+          fighterId: metadata.fighterId || 'f1',
           fighterName,
           roundNumber: metadata.roundNumber || 1,
+          roundDurationMs: durationMs,
           analyzedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           overallScore: typeof parsed.overallScore === 'number' ? parsed.overallScore : 88,
           grade: parsed.grade || 'A-',
@@ -183,15 +225,18 @@ Return ONLY a valid JSON object matching this exact format:
             takedownDefensePct: 88,
             cageControlSeconds: 16,
           },
-          flaws: Array.isArray(parsed.flaws) ? parsed.flaws : [],
-          keyMoments: Array.isArray(parsed.keyMoments) ? parsed.keyMoments : [],
-          prescribedDrills: Array.isArray(parsed.prescribedDrills) ? parsed.prescribedDrills : [],
+          tacticalSequences,
+          biomechanicalMetrics,
+          insights,
+          actionItems,
+          flaws,
+          keyMoments,
+          prescribedDrills,
           source: `Gemini (${modelName})`,
         };
       }
     } catch (err: any) {
       console.warn(`Gemini model ${modelName} call error:`, err.message);
-      // continue to next model in CANDIDATE_MODELS
     }
   }
 

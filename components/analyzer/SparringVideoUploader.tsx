@@ -26,7 +26,9 @@ import {
   Activity, 
   Check, 
   ArrowRight,
-  RefreshCw
+  RefreshCw,
+  Database,
+  Compass
 } from 'lucide-react';
 
 const SAMPLE_SPARRING_VIDEO = 'https://vjs.zencdn.net/v/oceans.mp4';
@@ -510,13 +512,23 @@ export const SparringVideoUploader: React.FC = () => {
                 </div>
               </div>
 
-              {/* AI Engine Badge */}
-              {feedback.source && (
-                <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-950/60 border border-red-800/80 text-red-300 text-[11px] font-mono self-start">
-                  <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                  <span>AI Vision: {feedback.source}</span>
+              {/* Pipeline Status Badges */}
+              <div className="flex flex-wrap items-center gap-2">
+                {feedback.source && (
+                  <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-950/60 border border-red-800/80 text-red-300 text-[11px] font-mono">
+                    <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                    <span>AI Vision: {feedback.source}</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-cyan-950/60 border border-cyan-800/80 text-cyan-300 text-[11px] font-mono">
+                  <Activity className="h-3.5 w-3.5 text-cyan-400" />
+                  <span>Qdrant: {feedback.qdrantIndexed !== false ? 'Vector Indexed (sparring_insights)' : 'Indexed Locally'}</span>
                 </div>
-              )}
+                <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-800/80 text-emerald-300 text-[11px] font-mono">
+                  <Database className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Database: {feedback.persistedToSupabase ? 'Supabase Relational' : 'Local-First Persistent'}</span>
+                </div>
+              </div>
 
               {/* Stats Strip */}
               <div className="grid grid-cols-3 gap-2 pt-2 border-t border-zinc-800/80 text-xs font-mono">
@@ -569,6 +581,107 @@ export const SparringVideoUploader: React.FC = () => {
                 )}
               </button>
             </div>
+
+            {/* Tactical Sequences & Positional Transitions */}
+            {feedback.tacticalSequences && feedback.tacticalSequences.length > 0 && (
+              <div className="rounded-3xl border border-zinc-800 bg-[#121216] p-5 flex flex-col gap-3 shadow-xl">
+                <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                  <h3 className="font-bold text-sm text-white font-mono flex items-center gap-2">
+                    <Compass className="h-4 w-4 text-cyan-400" />
+                    Positional Transitions &amp; Tactical Sequences
+                  </h3>
+                  <span className="text-[11px] font-mono text-zinc-500">
+                    Click to jump
+                  </span>
+                </div>
+
+                <div className="space-y-3">
+                  {feedback.tacticalSequences.map((seq) => (
+                    <div
+                      key={seq.id}
+                      onClick={() => seekToTimestamp(seq.startTimestampMs / 1000)}
+                      className="p-3.5 rounded-2xl border border-zinc-800 bg-zinc-950/70 hover:border-cyan-500/60 cursor-pointer transition-all flex flex-col gap-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-cyan-400 font-mono font-bold text-[11px]">
+                            {formatSec(seq.startTimestampMs / 1000)} - {formatSec(seq.endTimestampMs / 1000)}
+                          </span>
+                          <span className="font-bold text-xs text-white font-mono">
+                            {seq.sequenceName}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-800 text-cyan-300">
+                          {seq.dominantDiscipline}
+                        </span>
+                      </div>
+
+                      <div className="px-2.5 py-1.5 rounded-xl bg-zinc-900/60 border border-zinc-800/80 text-[11px] text-zinc-300 font-mono flex items-center gap-2">
+                        <span className="text-zinc-500 uppercase text-[10px]">Transition:</span>
+                        <span className="text-cyan-300 font-semibold">{seq.positionalTransition}</span>
+                      </div>
+
+                      <p className="text-[11px] text-zinc-400 leading-relaxed">
+                        {seq.description}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Real-time Biomechanical Joint Angles */}
+            {feedback.biomechanicalMetrics && feedback.biomechanicalMetrics.length > 0 && (
+              <div className="rounded-3xl border border-zinc-800 bg-[#121216] p-5 flex flex-col gap-3 shadow-xl">
+                <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                  <h3 className="font-bold text-sm text-white font-mono flex items-center gap-2">
+                    <Activity className="h-4 w-4 text-red-500" />
+                    Biomechanical Joint &amp; Kinematic Metrics
+                  </h3>
+                  <span className="text-[11px] font-mono text-zinc-500">
+                    Click to jump
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {feedback.biomechanicalMetrics.map((metric) => (
+                    <div
+                      key={metric.id}
+                      onClick={() => seekToTimestamp(metric.timestampMs / 1000)}
+                      className="p-3 rounded-2xl border border-zinc-800 bg-zinc-950/70 hover:border-red-500/50 cursor-pointer transition-all flex flex-col justify-between"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] uppercase font-mono tracking-wider text-zinc-400">
+                          {metric.jointOrSegment}
+                        </span>
+                        <span className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded ${
+                          metric.status === 'optimal'
+                            ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            : metric.status === 'warning'
+                            ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                            : 'bg-red-950 text-red-300 border border-red-800'
+                        }`}>
+                          {metric.status}
+                        </span>
+                      </div>
+
+                      <div className="my-1.5">
+                        <span className="text-xl font-bold font-mono text-white">
+                          {metric.measuredValue}{metric.unit}
+                        </span>
+                        <span className="text-[10px] text-zinc-500 font-mono ml-2">
+                          (Target: {metric.optimalRangeMin}-{metric.optimalRangeMax}{metric.unit})
+                        </span>
+                      </div>
+
+                      <p className="text-[10px] text-zinc-400 font-mono line-clamp-1">
+                        {metric.notes || metric.metricName}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Biomechanical Flaws & Corrections */}
             <div className="rounded-3xl border border-zinc-800 bg-[#121216] p-5 flex flex-col gap-3 shadow-xl">

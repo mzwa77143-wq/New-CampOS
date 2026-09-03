@@ -45,8 +45,25 @@ export interface TechniqueMatchCard {
   vectorEmbedding?: number[];
 }
 
+export interface SparringInsightMatch {
+  id: string;
+  sessionId: string;
+  fighterId: string;
+  title: string;
+  category: string;
+  observation: string;
+  correction: string;
+  timestampMs: number;
+  endTimestampMs?: number;
+  timestampSeconds: number;
+  similarityScore: number;
+  videoUrl?: string;
+  severity?: 'critical' | 'warning' | 'advisory';
+}
+
 export interface SearchRequest {
   query_text: string;
+  target?: 'techniques' | 'insights' | 'all';
   discipline?: Discipline | 'All';
   movement_type?: string;
   stance?: Stance | 'All';
@@ -58,6 +75,7 @@ export interface SearchRequest {
 
 export interface SearchResponse {
   results: TechniqueMatchCard[];
+  insightMatches?: SparringInsightMatch[];
   total_matches: number;
   latency_ms: number;
   fallback_applied: boolean;
@@ -67,6 +85,7 @@ export interface SearchResponse {
     movement_type?: string;
     min_confidence?: number;
     max_posture_angle?: number;
+    target?: string;
   };
 }
 

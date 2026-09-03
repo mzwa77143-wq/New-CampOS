@@ -66,6 +66,19 @@ const COMBAT_TAXONOMY: Record<string, number[]> = {
   "rotational torque": [240, 241, 242],
   "angle": [250, 251, 252],
   "pivot": [250, 253, 254],
+  "dropped hands": [260, 261, 262],
+  "guard recovery": [263, 264, 265],
+  "stance stability": [266, 267, 268],
+  "overextension": [269, 270, 271],
+  "weight overextension": [200, 269, 270, 271],
+  "hip elevation": [210, 211, 272, 273],
+  "clinch": [2, 6, 280, 281],
+  "open guard": [95, 96, 282, 283],
+  "mount": [284, 285, 286],
+  "mount scramble": [284, 285, 287, 288],
+  "vulnerability": [290, 291, 292],
+  "fault": [290, 293, 294],
+  "caught in underhook": [1, 9, 17, 31, 33, 275],
 };
 
 /**

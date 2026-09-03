@@ -4,11 +4,58 @@ import {
   SearchRequest, 
   SearchResponse, 
   FilterTaxonomy, 
-  Discipline 
+  Discipline,
+  SparringInsightMatch 
 } from '@/types/video-search';
 import { generateEmbedding, cosineSimilarity, VECTOR_DIMENSION } from './embeddings';
 
 export const COLLECTION_NAME = 'mma_technical_framework';
+export const SPARRING_INSIGHTS_COLLECTION = 'sparring_insights';
+
+const INITIAL_SPARRING_INSIGHTS: (Omit<SparringInsightMatch, 'similarityScore'> & { vectorEmbedding?: number[] })[] = [
+  {
+    id: 'ins_seed_1',
+    sessionId: 'spar_demo_01',
+    fighterId: 'f1',
+    title: 'Caught in Underhook & Pinned to Fence',
+    category: 'tactical',
+    observation: 'During the collar-tie pummeling at the fence, partner dug a deep left underhook and elevated your shoulder, neutralizing your head position.',
+    correction: 'Pummel aggressively for double underhooks or drop into an overhook whizzer and frame on opponent neck to disengage.',
+    timestampMs: 14500,
+    endTimestampMs: 18200,
+    timestampSeconds: 14.5,
+    severity: 'critical',
+    videoUrl: 'https://vjs.zencdn.net/v/oceans.mp4',
+  },
+  {
+    id: 'ins_seed_2',
+    sessionId: 'spar_demo_01',
+    fighterId: 'f1',
+    title: 'Dropped Rear Hand on Lead Hook Recovery',
+    category: 'biomechanical',
+    observation: 'While throwing the lead hook in the pocket, your right hand dropped 25° below chin level, exposing the jaw to counter overhands.',
+    correction: 'Glue right thumb to zygomatic arch throughout the rotational delivery and recovery of lead hook.',
+    timestampMs: 4500,
+    endTimestampMs: 7200,
+    timestampSeconds: 4.5,
+    severity: 'critical',
+    videoUrl: 'https://vjs.zencdn.net/v/oceans.mp4',
+  },
+  {
+    id: 'ins_seed_3',
+    sessionId: 'spar_demo_01',
+    fighterId: 'f1',
+    title: 'Thoracic Overextension on Double Jab Entry',
+    category: 'biomechanical',
+    observation: 'Lunged forward on double jab, shifting 78% of body mass onto the lead leg and breaking spine alignment forward.',
+    correction: 'Drive linear advancement from rear foot push-off, keeping head behind lead knee vertical plane.',
+    timestampMs: 24000,
+    endTimestampMs: 27500,
+    timestampSeconds: 24.0,
+    severity: 'warning',
+    videoUrl: 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4',
+  },
+];
 
 // Initial repository of 12 indexed MMA video slices with rich biomechanical telemetry
 const INITIAL_MMA_TECHNIQUES: Omit<TechniqueMatchCard, 'similarityScore'>[] = [
@@ -292,6 +339,7 @@ export class MMAVectorSearchService {
   private client: QdrantClient | null = null;
   private isConnectedToRemote: boolean = false;
   private indexedTechniques: TechniqueMatchCard[] = [];
+  private indexedInsights: Map<string, SparringInsightMatch & { vectorEmbedding: number[] }> = new Map();
 
   constructor() {
     const qdrantUrl = process.env.QDRANT_URL || '';
@@ -319,6 +367,17 @@ export class MMAVectorSearchService {
         similarityScore: 0,
         vectorEmbedding,
       };
+    });
+
+    // Initialize seed sparring insights
+    INITIAL_SPARRING_INSIGHTS.forEach((ins) => {
+      const semanticContext = `${ins.title} ${ins.category} ${ins.observation} ${ins.correction}`;
+      const vectorEmbedding = generateEmbedding(semanticContext);
+      this.indexedInsights.set(ins.id, {
+        ...ins,
+        similarityScore: 0,
+        vectorEmbedding,
+      });
     });
   }
 
@@ -393,11 +452,21 @@ export class MMAVectorSearchService {
       limit
     );
 
+    // 3. Search Sparring Insights if target is 'insights' or 'all'
+    let insightMatches: SparringInsightMatch[] | undefined;
+    if (filters.target === 'insights' || filters.target === 'all') {
+      insightMatches = await this.searchSparringInsights(queryVector, limit);
+    }
+
     const latency = Date.now() - startTime;
+    const finalResults = filters.target === 'insights' ? [] : results;
+    const totalMatches = (filters.target === 'insights' ? (insightMatches?.length || 0) : results.length) + 
+      (filters.target === 'all' ? (insightMatches?.length || 0) : 0);
 
     return {
-      results,
-      total_matches: results.length,
+      results: finalResults,
+      insightMatches,
+      total_matches: totalMatches,
       latency_ms: Math.min(latency, 45), // Sub-50ms execution guaranteed
       fallback_applied: fallbackApplied,
       fallback_reason: fallbackReason,
@@ -406,8 +475,93 @@ export class MMAVectorSearchService {
         movement_type: filters.movement_type,
         min_confidence: filters.min_confidence,
         max_posture_angle: filters.max_posture_angle,
+        target: filters.target,
       },
     };
+  }
+
+  /**
+   * Upsert an analyzed sparring insight into Qdrant & in-memory cache
+   */
+  async upsertSparringInsight(
+    insightId: string,
+    vector: number[],
+    payload: Omit<SparringInsightMatch, 'similarityScore'>
+  ): Promise<boolean> {
+    // 1. Cache locally in-memory
+    this.indexedInsights.set(insightId, {
+      ...payload,
+      similarityScore: 0,
+      vectorEmbedding: vector,
+    });
+
+    // 2. Upsert to remote Qdrant if connected
+    if (this.client && this.isConnectedToRemote) {
+      try {
+        await this.client.upsert(SPARRING_INSIGHTS_COLLECTION, {
+          points: [
+            {
+              id: insightId,
+              vector,
+              payload: payload as any,
+            },
+          ],
+        });
+      } catch (err) {
+        console.warn('Qdrant sparring insight upsert notice (using local-first vector store):', err);
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Retrieve sparring insights by semantic vector similarity
+   */
+  async searchSparringInsights(
+    queryVector: number[],
+    limit: number = 5
+  ): Promise<SparringInsightMatch[]> {
+    if (this.client && this.isConnectedToRemote) {
+      try {
+        const queryRes = await this.client.query(SPARRING_INSIGHTS_COLLECTION, {
+          query: queryVector,
+          limit,
+          with_payload: true,
+        });
+        const points = queryRes?.points || [];
+        if (points.length > 0) {
+          return points.map((p: any) => ({
+            ...(p.payload as SparringInsightMatch),
+            similarityScore: parseFloat(p.score.toFixed(3)),
+          }));
+        }
+      } catch (err) {
+        // Fallback to embedded engine
+      }
+    }
+
+    // Embedded vector cosine similarity search
+    const candidates = Array.from(this.indexedInsights.values()).map((ins) => {
+      const score = cosineSimilarity(queryVector, ins.vectorEmbedding);
+      return {
+        id: ins.id,
+        sessionId: ins.sessionId,
+        fighterId: ins.fighterId,
+        title: ins.title,
+        category: ins.category,
+        observation: ins.observation,
+        correction: ins.correction,
+        timestampMs: ins.timestampMs,
+        endTimestampMs: ins.endTimestampMs,
+        timestampSeconds: ins.timestampSeconds,
+        videoUrl: ins.videoUrl,
+        severity: ins.severity,
+        similarityScore: parseFloat(score.toFixed(3)),
+      };
+    });
+
+    candidates.sort((a, b) => b.similarityScore - a.similarityScore);
+    return candidates.slice(0, limit);
   }
 
   /**
