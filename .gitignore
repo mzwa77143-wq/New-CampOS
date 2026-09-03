@@ -36,3 +36,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# uploaded videos & local database storage
+/public/uploads/videos/*
+!/public/uploads/videos/.gitkeep
+/data/*.json
+

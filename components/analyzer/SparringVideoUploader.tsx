@@ -28,8 +28,12 @@ import {
   ArrowRight,
   RefreshCw,
   Database,
-  Compass
+  Compass,
+  Trash2,
+  Film,
+  HardDrive
 } from 'lucide-react';
+import { UploadedVideoRecord } from '@/lib/db/video-db';
 
 const SAMPLE_SPARRING_VIDEO = 'https://vjs.zencdn.net/v/oceans.mp4';
 
@@ -43,6 +47,12 @@ export const SparringVideoUploader: React.FC = () => {
   const [partnerStyle, setPartnerStyle] = useState<string>('Southpaw Pressure Boxer');
   const [intensity, setIntensity] = useState<SparringUploadMetadata['intensity']>('Championship Hard');
 
+  // Video Database & Vault state
+  const [storedVideos, setStoredVideos] = useState<UploadedVideoRecord[]>([]);
+  const [isLoadingStoredVideos, setIsLoadingStoredVideos] = useState<boolean>(false);
+  const [isUploadingToDb, setIsUploadingToDb] = useState<boolean>(false);
+  const [dbUploadStatus, setDbUploadStatus] = useState<string | null>(null);
+
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [analysisStep, setAnalysisStep] = useState<string>('');
   const [feedback, setFeedback] = useState<AiSparringFeedback | null>(null);
@@ -55,14 +65,102 @@ export const SparringVideoUploader: React.FC = () => {
   const [duration, setDuration] = useState<number>(30);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Fetch stored videos from database on mount
+  const fetchStoredVideos = async () => {
+    setIsLoadingStoredVideos(true);
+    try {
+      const res = await fetch('/api/v1/mma/videos');
+      if (res.ok) {
+        const data = await res.json();
+        if (data.videos) {
+          setStoredVideos(data.videos);
+        }
+      }
+    } catch (e) {
+      console.warn('[Sparring Uploader: Vault] Error loading stored videos:', e);
+    } finally {
+      setIsLoadingStoredVideos(false);
+    }
+  };
+
+  React.useEffect(() => {
+    fetchStoredVideos();
+  }, []);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setVideoUrl(url);
-      setVideoFileName(file.name);
-      setFeedback(null);
-      setIsSyncedToCamp(false);
+    if (!file) return;
+
+    console.log('[Sparring Uploader: Video Selected]', {
+      name: file.name,
+      sizeMB: (file.size / (1024 * 1024)).toFixed(2),
+      type: file.type,
+    });
+
+    const localUrl = URL.createObjectURL(file);
+    setVideoUrl(localUrl);
+    setVideoFileName(file.name);
+    setFeedback(null);
+    setIsSyncedToCamp(false);
+
+    // Upload and persist to video database
+    setIsUploadingToDb(true);
+    setDbUploadStatus('Saving to video database...');
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('fighterId', fighterId);
+      formData.append('roundNumber', roundNumber.toString());
+      formData.append('partnerStyle', partnerStyle);
+      formData.append('intensity', intensity);
+      formData.append('durationSeconds', (duration || 30).toString());
+
+      const res = await fetch('/api/v1/mma/videos/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        console.log('[Sparring Uploader: Stored in Database]', data);
+        if (data.video && data.video.videoUrl) {
+          setVideoUrl(data.video.videoUrl);
+          setDbUploadStatus(`Saved to ${data.video.storageProvider === 'supabase' ? 'Supabase' : 'Database'}`);
+        }
+        fetchStoredVideos();
+      } else {
+        setDbUploadStatus('Saved locally for preview');
+      }
+    } catch (err) {
+      console.warn('[Sparring Uploader: DB Upload Notice]', err);
+      setDbUploadStatus('Saved locally for preview');
+    } finally {
+      setIsUploadingToDb(false);
+    }
+  };
+
+  const handleLoadStoredVideo = (v: UploadedVideoRecord) => {
+    console.log('[Sparring Uploader: Load Stored Video]', v);
+    setVideoUrl(v.videoUrl);
+    setVideoFileName(v.fileName);
+    setFighterId(v.fighterId);
+    setRoundNumber(v.roundNumber || 1);
+    if (v.partnerStyle) setPartnerStyle(v.partnerStyle);
+    if (v.intensity) setIntensity(v.intensity as any);
+    setFeedback(null);
+    setIsSyncedToCamp(false);
+    setDbUploadStatus(`Loaded: ${v.storageProvider === 'supabase' ? 'Supabase' : 'Local Database'}`);
+  };
+
+  const handleDeleteStoredVideo = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/v1/mma/videos?id=${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setStoredVideos((prev) => prev.filter((v) => v.id !== id));
+      }
+    } catch (err) {
+      console.error('Error deleting stored video:', err);
     }
   };
 
@@ -71,6 +169,7 @@ export const SparringVideoUploader: React.FC = () => {
     setVideoFileName('Championship_Sparring_Round3_CamA.mp4');
     setFeedback(null);
     setIsSyncedToCamp(false);
+    setDbUploadStatus('Loaded from Sample CDN');
   };
 
   const handleStartAnalysis = async () => {
@@ -304,8 +403,14 @@ export const SparringVideoUploader: React.FC = () => {
                 Click to browse or drop sparring footage here
               </span>
               <span className="text-xs text-zinc-500 mt-1 font-mono">
-                Supports MP4, MOV, WebM &bull; Instant in-browser streaming (No upload limits)
+                Supports MP4, MOV, WebM &bull; Automatically saved to video database &amp; storage
               </span>
+              {isUploadingToDb && (
+                <div className="mt-3 flex items-center gap-2 text-xs font-mono text-cyan-400 bg-cyan-950/60 px-3 py-1.5 rounded-xl border border-cyan-800 animate-pulse">
+                  <Activity className="h-3.5 w-3.5 animate-spin" />
+                  <span>Saving video to database &amp; storage...</span>
+                </div>
+              )}
             </label>
           ) : (
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-4 rounded-2xl bg-zinc-900/80 border border-zinc-800">
@@ -314,10 +419,17 @@ export const SparringVideoUploader: React.FC = () => {
                   <Video className="h-5 w-5" />
                 </div>
                 <div>
-                  <span className="font-bold text-xs text-white font-mono block truncate max-w-sm">
-                    {videoFileName || 'Selected Sparring Clip'}
-                  </span>
-                  <span className="text-[11px] text-zinc-400 font-mono">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-xs text-white font-mono block truncate max-w-sm">
+                      {videoFileName || 'Selected Sparring Clip'}
+                    </span>
+                    {dbUploadStatus && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950/80 border border-cyan-800 text-cyan-300">
+                        {dbUploadStatus}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[11px] text-zinc-400 font-mono mt-0.5 block">
                     Ready for AI Computer Vision Analysis
                   </span>
                 </div>
@@ -362,6 +474,93 @@ export const SparringVideoUploader: React.FC = () => {
           )}
 
         </div>
+      </div>
+
+      {/* 2. Camp Video Database / Stored Footage Vault */}
+      <div className="rounded-3xl border border-zinc-800 bg-[#121216] p-5 sm:p-6 shadow-xl flex flex-col gap-4">
+        <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+          <div className="flex items-center gap-2">
+            <Film className="h-5 w-5 text-red-500" />
+            <h3 className="font-bold text-sm text-white font-mono tracking-tight">
+              Camp Video Database &bull; Stored Sparring Footage Vault
+            </h3>
+          </div>
+          <div className="flex items-center gap-2 text-xs font-mono">
+            <span className="px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-400">
+              {storedVideos.length} Stored in Database
+            </span>
+            <button
+              type="button"
+              onClick={fetchStoredVideos}
+              disabled={isLoadingStoredVideos}
+              className="p-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-white transition-all"
+              title="Refresh Database"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isLoadingStoredVideos ? 'animate-spin text-red-400' : ''}`} />
+            </button>
+          </div>
+        </div>
+
+        {storedVideos.length === 0 ? (
+          <div className="p-8 text-center text-zinc-500 font-mono text-xs rounded-2xl border border-dashed border-zinc-800">
+            No videos stored in database yet. Upload a sparring round above to store it in Supabase &amp; local database.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {storedVideos.map((v) => {
+              const isCurrent = videoUrl === v.videoUrl;
+              return (
+                <div
+                  key={v.id}
+                  onClick={() => handleLoadStoredVideo(v)}
+                  className={`p-3.5 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 group ${
+                    isCurrent
+                      ? 'bg-zinc-900 border-red-500 shadow-glow-red'
+                      : 'bg-zinc-950/70 border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/60'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-red-400 group-hover:text-red-300">
+                        <Video className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <span className="font-bold text-xs text-white font-mono block truncate" title={v.fileName}>
+                          {v.fileName}
+                        </span>
+                        <span className="text-[10px] text-zinc-400 font-mono block mt-0.5">
+                          R{v.roundNumber} &bull; {(v.fileSizeBytes / (1024 * 1024)).toFixed(1)} MB &bull; {v.durationSeconds}s
+                        </span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={(e) => handleDeleteStoredVideo(v.id, e)}
+                      className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-950/50 transition-all opacity-0 group-hover:opacity-100"
+                      title="Delete from Database"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="flex items-center justify-between pt-2 border-t border-zinc-800/80 text-[10px] font-mono">
+                    <span className={`px-2 py-0.5 rounded border ${
+                      v.storageProvider === 'supabase'
+                        ? 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+                        : 'bg-cyan-950/60 border-cyan-800 text-cyan-300'
+                    }`}>
+                      {v.storageProvider === 'supabase' ? 'Supabase Storage' : 'Local Disk DB'}
+                    </span>
+                    <span className="text-zinc-500">
+                      {new Date(v.uploadedAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 2. Interactive AI Feedback & Video Player Layout */}
