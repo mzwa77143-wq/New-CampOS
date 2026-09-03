@@ -15,6 +15,7 @@ import {
   INITIAL_TRAINING_SESSIONS, 
   MOCK_WEIGHT_TRAJECTORY 
 } from './mock-data';
+import { AnalysisJob } from './ai/video-jobs';
 
 interface CampStoreState {
   currentRole: 'coach' | 'fighter' | 'analyzer';
@@ -33,6 +34,11 @@ interface CampStoreState {
   isWeighInModalOpen: boolean;
   isCheckInModalOpen: boolean;
 
+  // Background Analysis Jobs state
+  activeJobs: AnalysisJob[];
+  completedJobs: AnalysisJob[];
+  selectedCompletedJobId: string | null;
+
   // Setters & UI Actions
   setRole: (role: 'coach' | 'fighter' | 'analyzer') => void;
   setSelectedFighterId: (id: string) => void;
@@ -42,6 +48,13 @@ interface CampStoreState {
   setCutSheetOpen: (open: boolean) => void;
   setWeighInModalOpen: (open: boolean) => void;
   setCheckInModalOpen: (open: boolean) => void;
+
+  // Job Actions
+  trackJob: (job: AnalysisJob) => void;
+  updateJob: (jobId: string, updates: Partial<AnalysisJob>) => void;
+  dismissJob: (jobId: string) => void;
+  setSelectedCompletedJobId: (jobId: string | null) => void;
+  fetchActiveJobs: () => Promise<void>;
 
   // Data Actions
   submitDailyCheckIn: (data: {
@@ -188,6 +201,11 @@ export const useCampStore = create<CampStoreState>((set, get) => {
     isCutSheetOpen: false,
     isWeighInModalOpen: false,
     isCheckInModalOpen: false,
+
+    // Background Analysis Jobs initial state
+    activeJobs: [],
+    completedJobs: [],
+    selectedCompletedJobId: null,
 
     setRole: (role) => set({ currentRole: role }),
     setSelectedFighterId: (id) => set({ selectedFighterId: id }),
@@ -515,6 +533,68 @@ export const useCampStore = create<CampStoreState>((set, get) => {
           weightTrajectories: fresh.weightTrajectories || state.weightTrajectories,
         }));
       }
+    },
+
+    trackJob: (job) => {
+      set((state) => {
+        const filtered = state.activeJobs.filter((j) => j.jobId !== job.jobId);
+        return { activeJobs: [job, ...filtered] };
+      });
+    },
+
+    updateJob: (jobId, updates) => {
+      set((state) => {
+        const activeIdx = state.activeJobs.findIndex((j) => j.jobId === jobId);
+        if (activeIdx !== -1) {
+          const current = state.activeJobs[activeIdx];
+          const updated = { ...current, ...updates };
+          if (updated.status === 'completed') {
+            return {
+              activeJobs: state.activeJobs.filter((j) => j.jobId !== jobId),
+              completedJobs: [updated, ...state.completedJobs.filter((j) => j.jobId !== jobId)],
+            };
+          }
+          const updatedActive = [...state.activeJobs];
+          updatedActive[activeIdx] = updated;
+          return { activeJobs: updatedActive };
+        }
+        return state;
+      });
+    },
+
+    dismissJob: (jobId) => {
+      set((state) => ({
+        activeJobs: state.activeJobs.filter((j) => j.jobId !== jobId),
+        completedJobs: state.completedJobs.filter((j) => j.jobId !== jobId),
+      }));
+    },
+
+    setSelectedCompletedJobId: (jobId) => {
+      set({ selectedCompletedJobId: jobId });
+    },
+
+    fetchActiveJobs: async () => {
+      try {
+        const res = await fetch('/api/v1/mma/jobs');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.jobs)) {
+            const active: AnalysisJob[] = [];
+            const completed: AnalysisJob[] = [];
+            data.jobs.forEach((j: AnalysisJob) => {
+              if (j.status === 'completed') completed.push(j);
+              else active.push(j);
+            });
+            set((state) => ({
+              activeJobs: active,
+              completedJobs: [
+                ...completed,
+                ...state.completedJobs.filter((cj) => !completed.some((c) => c.jobId === cj.jobId)),
+              ],
+            }));
+          }
+        }
+      } catch (e) {}
     },
   };
 });

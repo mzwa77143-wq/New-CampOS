@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { PwaRegister } from '@/components/ui/PwaRegister';
+import { BackgroundJobHUD } from '@/components/analyzer/BackgroundJobHUD';
 
 export const metadata: Metadata = {
   title: 'CampOS • Combat Sports Fight Camp Operating System',
@@ -37,6 +38,7 @@ export default function RootLayout({
       >
         <PwaRegister />
         {children}
+        <BackgroundJobHUD />
       </body>
     </html>
   );

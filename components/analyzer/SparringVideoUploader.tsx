@@ -38,7 +38,15 @@ import { UploadedVideoRecord } from '@/lib/db/video-db';
 const SAMPLE_SPARRING_VIDEO = 'https://vjs.zencdn.net/v/oceans.mp4';
 
 export const SparringVideoUploader: React.FC = () => {
-  const { fighters, selectedFighterId, syncAiSparringDebrief } = useCampStore();
+  const { 
+    fighters, 
+    selectedFighterId, 
+    syncAiSparringDebrief,
+    trackJob,
+    completedJobs,
+    selectedCompletedJobId,
+    setSelectedCompletedJobId 
+  } = useCampStore();
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoFileName, setVideoFileName] = useState<string | null>(null);
@@ -53,6 +61,9 @@ export const SparringVideoUploader: React.FC = () => {
   const [isUploadingToDb, setIsUploadingToDb] = useState<boolean>(false);
   const [dbUploadStatus, setDbUploadStatus] = useState<string | null>(null);
 
+  // Background Analysis Job state
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [jobProgress, setJobProgress] = useState<number>(0);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [analysisStep, setAnalysisStep] = useState<string>('');
   const [feedback, setFeedback] = useState<AiSparringFeedback | null>(null);
@@ -216,7 +227,7 @@ export const SparringVideoUploader: React.FC = () => {
     setAnalysisStep('Streaming visual telemetry to Google Gemini Multimodal AI...');
 
     try {
-      console.log('[Sparring Uploader: Request] Calling POST /api/v1/mma/sparring-analysis...');
+      console.log('[Sparring Uploader: Request] Calling POST /api/v1/mma/sparring-analysis (Async Dispatch)...');
       const res = await fetch('/api/v1/mma/sparring-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -228,6 +239,7 @@ export const SparringVideoUploader: React.FC = () => {
             sparringPartnerStyle: partnerStyle,
             intensity,
             videoFileName,
+            videoUrl: videoUrl || undefined,
           },
           duration: duration || 30,
           frames: capturedFrames.length > 0 ? capturedFrames : undefined,
@@ -235,26 +247,89 @@ export const SparringVideoUploader: React.FC = () => {
       });
 
       if (!res.ok) throw new Error(`Analysis request failed with status ${res.status}`);
-      const data: AiSparringFeedback = await res.json();
-      console.log('[Sparring Uploader: Analysis Received]', {
-        sessionId: data.sessionId,
-        score: data.overallScore,
-        grade: data.grade,
-        source: data.source,
-        tacticalSequences: data.tacticalSequences?.length || 0,
-        biomechanicalMetrics: data.biomechanicalMetrics?.length || 0,
-        insights: data.insights?.length || 0,
-        actionItems: data.actionItems?.length || 0,
-        qdrantIndexed: data.qdrantIndexed,
-        persistedToSupabase: data.persistedToSupabase,
-      });
-      setFeedback(data);
+      const data = await res.json();
+      console.log('[Sparring Uploader: Async Job Dispatched]', data);
+
+      if (data.job) {
+        trackJob(data.job);
+        setActiveJobId(data.job.jobId);
+        setJobProgress(data.job.progress || 5);
+        setAnalysisStep(data.job.stage || 'Dispatched to background processing engine...');
+      }
     } catch (err) {
-      console.error('[Sparring Uploader: Error] AI Sparring Analysis failed:', err);
-    } finally {
+      console.error('[Sparring Uploader: Error] AI Sparring Analysis dispatch failed:', err);
       setIsAnalyzing(false);
     }
   };
+
+  // Inline progress tracker while activeJobId is running
+  React.useEffect(() => {
+    if (!activeJobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/v1/mma/jobs?jobId=${activeJobId}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.job) {
+            setJobProgress(data.job.progress);
+            setAnalysisStep(data.job.stage);
+
+            if (data.job.status === 'completed') {
+              clearInterval(interval);
+              setIsAnalyzing(false);
+              setActiveJobId(null);
+              if (data.job.result) {
+                setFeedback(data.job.result);
+              }
+            } else if (data.job.status === 'failed') {
+              clearInterval(interval);
+              setIsAnalyzing(false);
+              setActiveJobId(null);
+              console.error('Background analysis failed:', data.job.error);
+            }
+          }
+        }
+      } catch (e) {}
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [activeJobId]);
+
+  // Load completed job if selected globally or from URL
+  React.useEffect(() => {
+    let targetJobId = selectedCompletedJobId;
+    if (!targetJobId && typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      targetJobId = params.get('jobId');
+    }
+
+    if (targetJobId) {
+      const found = completedJobs.find((j) => j.jobId === targetJobId);
+      if (found && found.result) {
+        setFeedback(found.result);
+        if (found.videoUrl) setVideoUrl(found.videoUrl);
+        if (found.videoFileName) setVideoFileName(found.videoFileName);
+        setFighterId(found.fighterId);
+        setRoundNumber(found.roundNumber);
+        setSelectedCompletedJobId(null);
+      } else {
+        fetch(`/api/v1/mma/jobs?jobId=${targetJobId}`)
+          .then((r) => r.json())
+          .then((d) => {
+            if (d.job && d.job.result) {
+              setFeedback(d.job.result);
+              if (d.job.videoUrl) setVideoUrl(d.job.videoUrl);
+              if (d.job.videoFileName) setVideoFileName(d.job.videoFileName);
+              setFighterId(d.job.fighterId);
+              setRoundNumber(d.job.roundNumber);
+              setSelectedCompletedJobId(null);
+            }
+          })
+          .catch(() => {});
+      }
+    }
+  }, [selectedCompletedJobId, completedJobs, setSelectedCompletedJobId]);
 
   const seekToTimestamp = (sec: number) => {
     console.log(`[Sparring Uploader: Video Scrub] Seeking video to ${sec.toFixed(1)}s (progress: ${((sec / (duration || 30)) * 100).toFixed(0)}%)`);
@@ -460,16 +535,31 @@ export const SparringVideoUploader: React.FC = () => {
 
           {/* AI Analysis Processing HUD */}
           {isAnalyzing && (
-            <div className="rounded-2xl border border-red-500/40 bg-zinc-950 p-6 flex flex-col items-center justify-center text-center gap-3 shadow-glow-red animate-pulse">
+            <div className="rounded-2xl border border-red-500/40 bg-zinc-950 p-6 flex flex-col items-center justify-center text-center gap-3 shadow-glow-red">
               <div className="relative">
-                <Activity className="h-10 w-10 text-red-500 animate-spin" />
+                <Activity className="h-8 w-8 text-red-500 animate-spin" />
               </div>
-              <h3 className="font-bold text-sm text-white font-mono uppercase tracking-wider">
-                AI Vision Pipeline Active
+              <h3 className="font-bold text-sm text-white font-mono uppercase tracking-wider flex items-center gap-2">
+                <span>Background Analysis Active</span>
+                <span className="text-red-400">({jobProgress}%)</span>
               </h3>
-              <p className="text-xs text-red-400 font-mono">
+
+              {/* Animated Progress Bar */}
+              <div className="w-full max-w-md bg-zinc-900 rounded-full h-2 overflow-hidden border border-zinc-800">
+                <div 
+                  className="bg-gradient-to-r from-red-600 via-red-500 to-amber-500 h-2 transition-all duration-300"
+                  style={{ width: `${Math.max(5, jobProgress)}%` }}
+                />
+              </div>
+
+              <p className="text-xs text-zinc-300 font-mono">
                 {analysisStep}
               </p>
+
+              <div className="text-[11px] text-zinc-400 font-mono bg-zinc-900/80 px-3 py-1.5 rounded-xl border border-zinc-800 flex items-center gap-2 mt-1">
+                <Sparkles className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                <span>Non-blocking background pipeline. You can navigate freely to Roster or Fighter Check-ins while processing runs.</span>
+              </div>
             </div>
           )}
 
