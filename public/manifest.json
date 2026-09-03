@@ -1,0 +1,16 @@
+{
+  "name": "CampOS - Fight Camp Operating System",
+  "short_name": "CampOS",
+  "description": "Combat Sports Fight Camp Management & Real-Time Weight Cut Tracking",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#ef4444",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
