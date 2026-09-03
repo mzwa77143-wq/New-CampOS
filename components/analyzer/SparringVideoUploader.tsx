@@ -101,12 +101,23 @@ export const SparringVideoUploader: React.FC = () => {
       }
     }
 
+    console.log('[Sparring Uploader: Start Pipeline]', {
+      fighterId,
+      roundNumber,
+      duration: duration || 30,
+      partnerStyle,
+      intensity,
+      framesExtracted: capturedFrames.length,
+      videoFileName,
+    });
+
     setAnalysisStep('Extracting skeletal keypoints & joint angles...');
     await new Promise((r) => setTimeout(r, 450));
 
-    setAnalysisStep('Streaming visual telemetry to Google Gemini 3.6 Flash...');
+    setAnalysisStep('Streaming visual telemetry to Google Gemini Multimodal AI...');
 
     try {
+      console.log('[Sparring Uploader: Request] Calling POST /api/v1/mma/sparring-analysis...');
       const res = await fetch('/api/v1/mma/sparring-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -124,17 +135,30 @@ export const SparringVideoUploader: React.FC = () => {
         }),
       });
 
-      if (!res.ok) throw new Error('Analysis request failed');
+      if (!res.ok) throw new Error(`Analysis request failed with status ${res.status}`);
       const data: AiSparringFeedback = await res.json();
+      console.log('[Sparring Uploader: Analysis Received]', {
+        sessionId: data.sessionId,
+        score: data.overallScore,
+        grade: data.grade,
+        source: data.source,
+        tacticalSequences: data.tacticalSequences?.length || 0,
+        biomechanicalMetrics: data.biomechanicalMetrics?.length || 0,
+        insights: data.insights?.length || 0,
+        actionItems: data.actionItems?.length || 0,
+        qdrantIndexed: data.qdrantIndexed,
+        persistedToSupabase: data.persistedToSupabase,
+      });
       setFeedback(data);
     } catch (err) {
-      console.error('AI Sparring Analysis failed:', err);
+      console.error('[Sparring Uploader: Error] AI Sparring Analysis failed:', err);
     } finally {
       setIsAnalyzing(false);
     }
   };
 
   const seekToTimestamp = (sec: number) => {
+    console.log(`[Sparring Uploader: Video Scrub] Seeking video to ${sec.toFixed(1)}s (progress: ${((sec / (duration || 30)) * 100).toFixed(0)}%)`);
     if (videoRef.current) {
       videoRef.current.currentTime = sec;
       setCurrentTime(sec);
@@ -145,6 +169,12 @@ export const SparringVideoUploader: React.FC = () => {
   const handleSyncToSchedule = () => {
     if (!feedback) return;
     const drillTitles = feedback.prescribedDrills.map((d) => `${d.title} (${d.setsAndReps})`);
+    console.log('[Sparring Uploader: Camp Sync] Syncing debrief to fighter training plan:', {
+      fighterId,
+      roundNumber,
+      drillsCount: drillTitles.length,
+      drills: drillTitles,
+    });
     syncAiSparringDebrief(fighterId, roundNumber, feedback.fightIqSummary, drillTitles);
     setIsSyncedToCamp(true);
   };

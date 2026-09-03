@@ -11,9 +11,10 @@ const inMemorySparringStore: Map<string, SparringAnalysisResponse> = new Map();
 export const getSupabaseClient = () => {
   if (supabaseUrl && supabaseAnonKey && supabaseUrl.startsWith('http')) {
     try {
+      console.log('[Supabase Service] Initialized remote Supabase client for URL:', supabaseUrl.substring(0, 20) + '...');
       return createClient(supabaseUrl, supabaseAnonKey);
     } catch (err) {
-      console.warn('Supabase initialization failed, falling back to local-first mode', err);
+      console.warn('[Supabase Service] Supabase initialization failed, falling back to local-first mode', err);
       return null;
     }
   }
@@ -28,11 +29,21 @@ export async function persistSparringSession(session: SparringAnalysisResponse):
   persistedToSupabase: boolean;
   sessionId: string;
 }> {
+  console.log('[Supabase Service: Persist] Saving session:', {
+    sessionId: session.sessionId,
+    fighterId: session.fighterId,
+    overallScore: session.overallScore,
+    grade: session.grade,
+    insightsCount: session.insights?.length || 0,
+    sequencesCount: session.tacticalSequences?.length || 0,
+  });
+
   // Always cache in-memory for instant retrieval and offline resilience
   inMemorySparringStore.set(session.sessionId, session);
 
   const client = getSupabaseClient();
   if (!client) {
+    console.log('[Supabase Service: Persist] Remote Supabase unconfigured. Session cached in local-first memory store (total cached:', inMemorySparringStore.size, ')');
     return {
       success: true,
       persistedToSupabase: false,
@@ -42,6 +53,7 @@ export async function persistSparringSession(session: SparringAnalysisResponse):
 
   try {
     // 1. Insert session header
+    console.log('[Supabase Service: Persist] Executing upsert on table "sparring_sessions"...');
     const { error: sessionError } = await client
       .from('sparring_sessions')
       .upsert({
@@ -59,12 +71,13 @@ export async function persistSparringSession(session: SparringAnalysisResponse):
       });
 
     if (sessionError) {
-      console.warn('Supabase session upsert notice (using local-first store):', sessionError.message);
+      console.warn('[Supabase Service: Persist] Notice from "sparring_sessions":', sessionError.message, '(session safely preserved in local store)');
       return { success: true, persistedToSupabase: false, sessionId: session.sessionId };
     }
 
     // 2. Insert relational insights
     if (session.insights && session.insights.length > 0) {
+      console.log(`[Supabase Service: Persist] Upserting ${session.insights.length} rows to "sparring_insights"...`);
       const insightRows = session.insights.map((ins) => ({
         id: ins.id,
         session_id: session.sessionId,
@@ -84,6 +97,7 @@ export async function persistSparringSession(session: SparringAnalysisResponse):
 
     // 3. Insert tactical sequences
     if (session.tacticalSequences && session.tacticalSequences.length > 0) {
+      console.log(`[Supabase Service: Persist] Upserting ${session.tacticalSequences.length} rows to "sparring_sequences"...`);
       const sequenceRows = session.tacticalSequences.map((seq) => ({
         id: seq.id,
         session_id: session.sessionId,
@@ -100,13 +114,14 @@ export async function persistSparringSession(session: SparringAnalysisResponse):
       await client.from('sparring_sequences').upsert(sequenceRows);
     }
 
+    console.log('[Supabase Service: Persist] Relational session and events committed successfully to Supabase.');
     return {
       success: true,
       persistedToSupabase: true,
       sessionId: session.sessionId,
     };
   } catch (err: any) {
-    console.warn('Supabase persistence caught error (using local-first fallback):', err.message);
+    console.warn('[Supabase Service: Persist] Caught error (using local-first fallback):', err.message);
     return {
       success: true,
       persistedToSupabase: false,
@@ -119,6 +134,7 @@ export async function persistSparringSession(session: SparringAnalysisResponse):
  * Retrieve sparring sessions for a given fighter (or all fighters)
  */
 export async function getSparringSessions(fighterId?: string): Promise<SparringAnalysisResponse[]> {
+  console.log('[Supabase Service: Retrieve] Fetching sessions for fighterId:', fighterId || 'All');
   const client = getSupabaseClient();
   if (client) {
     try {
@@ -128,6 +144,7 @@ export async function getSparringSessions(fighterId?: string): Promise<SparringA
       }
       const { data, error } = await query;
       if (!error && data && data.length > 0) {
+        console.log(`[Supabase Service: Retrieve] Found ${data.length} sessions in Supabase.`);
         return data as any[];
       }
     } catch (e) {
@@ -136,8 +153,7 @@ export async function getSparringSessions(fighterId?: string): Promise<SparringA
   }
 
   const all = Array.from(inMemorySparringStore.values());
-  if (fighterId) {
-    return all.filter((s) => s.fighterId === fighterId);
-  }
-  return all;
+  const filtered = fighterId ? all.filter((s) => s.fighterId === fighterId) : all;
+  console.log(`[Supabase Service: Retrieve] Returning ${filtered.length} sessions from local-first memory store.`);
+  return filtered;
 }

@@ -379,6 +379,13 @@ export class MMAVectorSearchService {
         vectorEmbedding,
       });
     });
+
+    console.log('[Qdrant Service] Vector engine initialized:', {
+      remoteConfigured: this.isConnectedToRemote,
+      remoteUrl: qdrantUrl || 'none (in-memory engine)',
+      indexedTechniquesCount: this.indexedTechniques.length,
+      indexedInsightsCount: this.indexedInsights.size,
+    });
   }
 
   /**
@@ -488,6 +495,16 @@ export class MMAVectorSearchService {
     vector: number[],
     payload: Omit<SparringInsightMatch, 'similarityScore'>
   ): Promise<boolean> {
+    console.log('[Qdrant Service: Upsert] Storing sparring insight:', {
+      insightId,
+      sessionId: payload.sessionId,
+      fighterId: payload.fighterId,
+      title: payload.title,
+      category: payload.category,
+      timestampSeconds: payload.timestampSeconds,
+      remoteClusterSync: this.isConnectedToRemote,
+    });
+
     // 1. Cache locally in-memory
     this.indexedInsights.set(insightId, {
       ...payload,
@@ -507,8 +524,9 @@ export class MMAVectorSearchService {
             },
           ],
         });
-      } catch (err) {
-        console.warn('Qdrant sparring insight upsert notice (using local-first vector store):', err);
+        console.log(`[Qdrant Service: Upsert] Successfully synced point ${insightId} to remote cluster.`);
+      } catch (err: any) {
+        console.warn('[Qdrant Service: Upsert] Remote cluster upsert notice (cached locally):', err?.message);
       }
     }
     return true;
@@ -521,6 +539,8 @@ export class MMAVectorSearchService {
     queryVector: number[],
     limit: number = 5
   ): Promise<SparringInsightMatch[]> {
+    console.log(`[Qdrant Service: Search Insights] Searching ${this.indexedInsights.size} indexed sparring insights (limit=${limit})...`);
+
     if (this.client && this.isConnectedToRemote) {
       try {
         const queryRes = await this.client.query(SPARRING_INSIGHTS_COLLECTION, {
@@ -530,13 +550,14 @@ export class MMAVectorSearchService {
         });
         const points = queryRes?.points || [];
         if (points.length > 0) {
+          console.log(`[Qdrant Service: Search Insights] Remote Qdrant returned ${points.length} points.`);
           return points.map((p: any) => ({
             ...(p.payload as SparringInsightMatch),
             similarityScore: parseFloat(p.score.toFixed(3)),
           }));
         }
-      } catch (err) {
-        // Fallback to embedded engine
+      } catch (err: any) {
+        console.warn('[Qdrant Service: Search Insights] Remote query notice (using local cosine engine):', err?.message);
       }
     }
 
@@ -561,7 +582,14 @@ export class MMAVectorSearchService {
     });
 
     candidates.sort((a, b) => b.similarityScore - a.similarityScore);
-    return candidates.slice(0, limit);
+    const topMatches = candidates.slice(0, limit);
+    console.log('[Qdrant Service: Search Insights] Top match:', topMatches[0] ? {
+      title: topMatches[0].title,
+      score: topMatches[0].similarityScore,
+      timestamp: topMatches[0].timestampSeconds,
+    } : 'None');
+
+    return topMatches;
   }
 
   /**

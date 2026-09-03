@@ -27,10 +27,25 @@ export async function analyzeSparringWithGemini(
 ): Promise<SparringAnalysisResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
 
+  console.log('[Gemini Service] Initializing sparring video analysis:', {
+    fighterId: metadata.fighterId,
+    round: metadata.roundNumber,
+    durationSeconds: actualDurationSeconds,
+    framesCount: framesBase64?.length || 0,
+    apiKeyConfigured: Boolean(apiKey),
+  });
+
   if (!apiKey) {
-    console.warn('GEMINI_API_KEY not configured in environment or GitHub Secrets. Using local combat engine fallback.');
+    console.warn('[Gemini Service] GEMINI_API_KEY not configured in environment or GitHub Secrets. Falling back to CampOS Combat Engine.');
+    const fallback = generateAiSparringFeedback(metadata, actualDurationSeconds);
+    console.log('[Gemini Service: Fallback] Combat engine generated response:', {
+      score: fallback.overallScore,
+      grade: fallback.grade,
+      tacticalSequences: fallback.tacticalSequences.length,
+      insights: fallback.insights.length,
+    });
     return {
-      ...generateAiSparringFeedback(metadata, actualDurationSeconds),
+      ...fallback,
       source: 'CampOS Combat Engine (Offline Fallback)',
     };
   }
@@ -151,9 +166,11 @@ Return ONLY a valid JSON object matching this exact format:
 
   for (const modelName of CANDIDATE_MODELS) {
     try {
+      console.log(`[Gemini Service] Contacting model: "${modelName}"...`);
       const model = genAI.getGenerativeModel({ model: modelName });
       const result = await model.generateContent(promptParts);
       const responseText = result.response.text();
+      console.log(`[Gemini Service] Model "${modelName}" returned ${responseText.length} characters.`);
 
       if (responseText) {
         const cleaned = responseText

@@ -71,6 +71,8 @@ export const MMAVideoAnalyzer: React.FC = () => {
           limit: 10,
         };
 
+        console.log('[Analyzer Client: Search Request]', payload);
+
         const res = await fetch('/api/v1/mma/search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -82,13 +84,20 @@ export const MMAVideoAnalyzer: React.FC = () => {
         }
 
         const data: SearchResponse = await res.json();
+        console.log('[Analyzer Client: Search Results]', {
+          totalMatches: data.total_matches,
+          latencyMs: data.latency_ms,
+          techniquesCount: data.results?.length || 0,
+          insightsCount: data.insightMatches?.length || 0,
+          fallbackApplied: data.fallback_applied,
+        });
         setSearchResponse(data);
 
         if (data.results && data.results.length > 0) {
           setSelectedTechnique(data.results[0]);
         }
       } catch (err) {
-        console.error('Vector search request error:', err);
+        console.error('[Analyzer Client: Search Error]', err);
       } finally {
         setIsLoading(false);
       }
@@ -102,21 +111,30 @@ export const MMAVideoAnalyzer: React.FC = () => {
   }, [executeSearch]);
 
   const handleSelectSuggested = (prompt: string) => {
+    console.log('[Analyzer Client: Selected Suggested Prompt]', prompt);
     setQueryText(prompt);
     executeSearch(prompt);
   };
 
   const handleDisciplineFilter = (disc: Discipline | 'All') => {
+    console.log('[Analyzer Client: Discipline Filter Changed]', disc);
     setSelectedDiscipline(disc);
     executeSearch(undefined, disc);
   };
 
   const handleTargetChange = (target: 'all' | 'techniques' | 'insights') => {
+    console.log('[Analyzer Client: Target Collection Changed]', target);
     setSearchTarget(target);
     executeSearch(undefined, undefined, target);
   };
 
   const handleSelectInsight = (insight: SparringInsightMatch) => {
+    console.log('[Analyzer Client: Selected Sparring Insight]', {
+      id: insight.id,
+      title: insight.title,
+      timestampSeconds: insight.timestampSeconds,
+      similarityScore: insight.similarityScore,
+    });
     setTargetSeekTime(insight.timestampSeconds);
     // If selected technique is not displaying, or we can align it
     if (insight.videoUrl && selectedTechnique) {
