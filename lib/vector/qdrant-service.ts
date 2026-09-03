@@ -335,7 +335,19 @@ const INITIAL_MMA_TECHNIQUES: Omit<TechniqueMatchCard, 'similarityScore'>[] = [
   },
 ];
 
-export class MMAVectorSearchService {
+export function toQdrantId(id: string): string {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return id;
+  let hash1 = 5381, hash2 = 52711;
+  for (let i = 0; i < id.length; i++) {
+    const char = id.charCodeAt(i);
+    hash1 = (hash1 * 33) ^ char;
+    hash2 = (hash2 * 33) ^ char;
+  }
+  const hex = (Math.abs(hash1).toString(16).padStart(16, '0') + Math.abs(hash2).toString(16).padStart(16, '0')).slice(0, 32);
+  return [hex.slice(0, 8), hex.slice(8, 12), '4' + hex.slice(13, 16), 'a' + hex.slice(17, 20), hex.slice(20, 32)].join('-');
+}
+
+class MMAVectorSearchService {
   private client: QdrantClient | null = null;
   private isConnectedToRemote: boolean = false;
   private indexedTechniques: TechniqueMatchCard[] = [];
@@ -386,6 +398,82 @@ export class MMAVectorSearchService {
       indexedTechniquesCount: this.indexedTechniques.length,
       indexedInsightsCount: this.indexedInsights.size,
     });
+
+    // Background sync seed points to remote Qdrant Cloud cluster
+    if (this.client && this.isConnectedToRemote) {
+      this.syncSeedDataToRemote().catch((e) => {
+        console.warn('[Qdrant Service] Background sync notice:', e?.message);
+      });
+    }
+  }
+
+  private async syncSeedDataToRemote(): Promise<void> {
+    if (!this.client || !this.isConnectedToRemote) return;
+    try {
+      // 1. Ensure mma_technical_framework collection exists
+      try {
+        await this.client.createCollection(COLLECTION_NAME, {
+          vectors: { size: 384, distance: 'Cosine' },
+        });
+      } catch (e) {}
+
+      // 2. Ensure sparring_insights collection exists
+      try {
+        await this.client.createCollection(SPARRING_INSIGHTS_COLLECTION, {
+          vectors: { size: 384, distance: 'Cosine' },
+        });
+      } catch (e) {}
+
+      // 3. Upsert techniques to Qdrant Cloud
+      const techniquePoints = this.indexedTechniques.map((tech) => ({
+        id: toQdrantId(tech.id),
+        vector: tech.vectorEmbedding!,
+        payload: {
+          id: tech.id,
+          techniqueName: tech.techniqueName,
+          discipline: tech.discipline,
+          movementType: tech.movementType,
+          description: tech.description,
+          tags: tech.tags,
+          biomechanicalData: tech.biomechanicalData,
+          startTimeSeconds: tech.startTimeSeconds,
+          endTimeSeconds: tech.endTimeSeconds,
+          videoUrl: tech.videoUrl,
+          thumbnailUrl: tech.thumbnailUrl,
+          fighterNames: tech.fighterNames,
+          eventTitle: tech.eventTitle,
+          stance: tech.stance,
+          confidenceScore: tech.confidenceScore,
+        },
+      }));
+
+      await this.client.upsert(COLLECTION_NAME, { points: techniquePoints });
+
+      // 4. Upsert seed insights to Qdrant Cloud
+      const insightPoints = Array.from(this.indexedInsights.values()).map((ins) => ({
+        id: toQdrantId(ins.id),
+        vector: ins.vectorEmbedding,
+        payload: {
+          id: ins.id,
+          sessionId: ins.sessionId,
+          fighterId: ins.fighterId,
+          title: ins.title,
+          category: ins.category,
+          observation: ins.observation,
+          correction: ins.correction,
+          timestampMs: ins.timestampMs,
+          endTimestampMs: ins.endTimestampMs,
+          timestampSeconds: ins.timestampSeconds,
+          videoUrl: ins.videoUrl,
+          severity: ins.severity,
+        },
+      }));
+
+      await this.client.upsert(SPARRING_INSIGHTS_COLLECTION, { points: insightPoints });
+      console.log(`[Qdrant Service: Remote Sync] Successfully populated ${techniquePoints.length} techniques and ${insightPoints.length} insights into remote Qdrant Cloud.`);
+    } catch (err: any) {
+      console.warn('[Qdrant Service: Remote Sync] Sync notice:', err?.message);
+    }
   }
 
   /**
@@ -440,9 +528,15 @@ export class MMAVectorSearchService {
             similarityScore: parseFloat(pt.score.toFixed(3)),
           }));
 
+          let insightMatches: SparringInsightMatch[] | undefined;
+          if (filters.target === 'insights' || filters.target === 'all') {
+            insightMatches = await this.searchSparringInsights(queryVector, limit);
+          }
+
           return {
-            results: mapped,
-            total_matches: mapped.length,
+            results: filters.target === 'insights' ? [] : mapped,
+            insightMatches,
+            total_matches: (filters.target === 'insights' ? 0 : mapped.length) + (insightMatches?.length || 0),
             latency_ms: latency,
             fallback_applied: false,
           };
@@ -518,7 +612,7 @@ export class MMAVectorSearchService {
         await this.client.upsert(SPARRING_INSIGHTS_COLLECTION, {
           points: [
             {
-              id: insightId,
+              id: toQdrantId(insightId),
               vector,
               payload: payload as any,
             },
