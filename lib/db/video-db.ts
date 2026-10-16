@@ -84,14 +84,21 @@ function readLocalDatabase(): UploadedVideoRecord[] {
   }
 }
 
-// Write local JSON file database
+// Write local JSON file database atomically
 function writeLocalDatabase(records: UploadedVideoRecord[]): void {
   ensureDataDir();
+  const tmpFile = `${DB_FILE}.tmp.${Date.now()}`;
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(records, null, 2), 'utf8');
+    fs.writeFileSync(tmpFile, JSON.stringify(records, null, 2), 'utf8');
+    fs.renameSync(tmpFile, DB_FILE);
     console.log(`[Video DB: Local File] Successfully committed ${records.length} video records to ${DB_FILE}`);
   } catch (err: any) {
     console.error('[Video DB: Local File Error] Failed to write database file:', err?.message);
+    try {
+      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    } catch (e) {
+      console.warn('[Video DB] Error cleaning up tmp file:', e);
+    }
   }
 }
 
@@ -123,7 +130,11 @@ export async function saveUploadedVideo(video: UploadedVideoRecord): Promise<{
   if (client) {
     try {
       console.log('[Video DB: Supabase] Upserting row into "uploaded_videos"...');
-      const { error } = await client.from('uploaded_videos').upsert({
+      const timeoutPromise = new Promise<{ error: any }>((_, reject) =>
+        setTimeout(() => reject(new Error('Supabase request timed out after 8000ms')), 8000)
+      );
+
+      const upsertPromise = client.from('uploaded_videos').upsert({
         id: video.id,
         fighter_id: video.fighterId,
         file_name: video.fileName,
@@ -140,6 +151,8 @@ export async function saveUploadedVideo(video: UploadedVideoRecord): Promise<{
         thumbnail_url: video.thumbnailUrl,
         uploaded_at: video.uploadedAt,
       });
+
+      const { error } = (await Promise.race([upsertPromise, timeoutPromise])) as any;
 
       if (!error) {
         console.log('[Video DB: Supabase] Row inserted successfully into Supabase "uploaded_videos".');
@@ -170,7 +183,7 @@ export async function getUploadedVideos(fighterId?: string): Promise<UploadedVid
         query = query.eq('fighter_id', fighterId);
       }
       const { data, error } = await query;
-      if (!error && data && data.length > 0) {
+      if (!error && data !== null && Array.isArray(data)) {
         console.log(`[Video DB: Supabase] Found ${data.length} records in remote database.`);
         return data.map((row: any) => ({
           id: row.id,
@@ -190,8 +203,8 @@ export async function getUploadedVideos(fighterId?: string): Promise<UploadedVid
           uploadedAt: row.uploaded_at,
         }));
       }
-    } catch (e) {
-      // Fallback to local store
+    } catch (e: any) {
+      console.warn('[Video DB] Supabase retrieval notice, falling back to local store:', e?.message);
     }
   }
 
@@ -219,14 +232,24 @@ export async function deleteUploadedVideo(id: string): Promise<boolean> {
   const localList = readLocalDatabase();
   const target = localList.find((v) => v.id === id);
 
-  // If local file exists, remove from disk
-  if (target && target.storageProvider === 'local' && target.videoUrl.startsWith('/uploads/videos/')) {
-    const localFilePath = path.join(process.cwd(), 'public', target.videoUrl);
+  // If local file exists, remove from disk with strict confinement against path traversal
+  if (target && target.storageProvider === 'local' && target.videoUrl) {
+    const baseDir = path.resolve(process.cwd(), 'public', 'uploads', 'videos');
+    const safeBaseName = path.basename(target.videoUrl);
+    const localFilePath = path.resolve(baseDir, safeBaseName);
+
+    // Assert file stays strictly inside uploads/videos directory
+    if (!localFilePath.startsWith(baseDir + path.sep)) {
+      throw new Error(`Invalid video path: Traversal forbidden for ${target.videoUrl}`);
+    }
+
     if (fs.existsSync(localFilePath)) {
       try {
         fs.unlinkSync(localFilePath);
         console.log('[Video DB: Delete] Deleted local video file from disk:', localFilePath);
-      } catch (e) {}
+      } catch (err: any) {
+        console.warn('[Video DB: Delete] Notice removing local file:', err?.message);
+      }
     }
   }
 
@@ -238,8 +261,13 @@ export async function deleteUploadedVideo(id: string): Promise<boolean> {
   const client = getSupabaseClient();
   if (client) {
     try {
-      await client.from('uploaded_videos').delete().eq('id', id);
-    } catch (e) {}
+      const { error } = await client.from('uploaded_videos').delete().eq('id', id);
+      if (error) {
+        console.warn('[Video DB: Delete] Supabase remote delete notice:', error.message);
+      }
+    } catch (e: any) {
+      console.warn('[Video DB: Delete] Supabase delete exception:', e?.message);
+    }
   }
 
   return true;

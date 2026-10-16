@@ -16,6 +16,7 @@ import {
   MOCK_WEIGHT_TRAJECTORY 
 } from './mock-data';
 import { AnalysisJob } from './ai/video-jobs';
+import { getLocalDateString, calculateDaysOut } from './utils';
 
 interface CampStoreState {
   currentRole: 'coach' | 'fighter' | 'analyzer';
@@ -53,6 +54,7 @@ interface CampStoreState {
   trackJob: (job: AnalysisJob) => void;
   updateJob: (jobId: string, updates: Partial<AnalysisJob>) => void;
   dismissJob: (jobId: string) => void;
+  cancelJob: (jobId: string) => Promise<void>;
   setSelectedCompletedJobId: (jobId: string | null) => void;
   fetchActiveJobs: () => Promise<void>;
 
@@ -102,45 +104,44 @@ let syncChannel: BroadcastChannel | null = null;
 const sendBroadcast = (type: string, payload: any) => {
   if (typeof window !== 'undefined') {
     try {
-      if (!syncChannel) {
+      if (!syncChannel && typeof BroadcastChannel !== 'undefined') {
         syncChannel = new BroadcastChannel('campos_realtime_sync');
       }
-      syncChannel.postMessage({ type, payload, timestamp: new Date().toISOString() });
-    } catch (e) {
-      // BroadcastChannel might not be supported in older envs
+      syncChannel?.postMessage({ type, payload, timestamp: new Date().toISOString() });
+    } catch (e: any) {
+      console.warn('[Sync] BroadcastChannel post message notice:', e?.message);
     }
   }
 };
 
-// Safe localStorage loader
-const loadInitialState = () => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
+// PIN lockout tracking: 5 failed attempts locks fighter out for 60 seconds (B5)
+const failedPinAttempts: Record<string, { count: number; lockedUntil: number }> = {};
+
+export function getPinLockoutRemainingSeconds(fighterId: string): number {
+  const attempt = failedPinAttempts[fighterId];
+  if (!attempt || !attempt.lockedUntil) return 0;
+  const remaining = Math.ceil((attempt.lockedUntil - Date.now()) / 1000);
+  return remaining > 0 ? remaining : 0;
+}
+
+export function resetPinLockout(fighterId: string): void {
+  delete failedPinAttempts[fighterId];
+}
+
+// Explicit sync initializer (N6: moved out of store initializer)
+let syncInitialized = false;
+export function initRealtimeSync(): void {
+  if (typeof window === 'undefined' || syncInitialized) return;
+  syncInitialized = true;
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      return JSON.parse(saved);
-    }
-  } catch (e) {
-    console.warn('Failed to parse cached CampOS state, using mock defaults');
-  }
-  return null;
-};
-
-export const useCampStore = create<CampStoreState>((set, get) => {
-  const cached = loadInitialState();
-
-  // Setup BroadcastChannel listener on client
-  if (typeof window !== 'undefined' && !syncChannel) {
-    try {
+    if (typeof BroadcastChannel !== 'undefined') {
       syncChannel = new BroadcastChannel('campos_realtime_sync');
       syncChannel.onmessage = (event) => {
         const { type } = event.data;
         if (type === 'STATE_UPDATED') {
           const fresh = loadInitialState();
           if (fresh) {
-            set((state) => ({
+            useCampStore.setState((state) => ({
               ...state,
               fighters: fresh.fighters || state.fighters,
               checkIns: fresh.checkIns || state.checkIns,
@@ -155,10 +156,30 @@ export const useCampStore = create<CampStoreState>((set, get) => {
           }
         }
       };
-    } catch (e) {
-      // Ignored if unsupported
     }
+  } catch (e: any) {
+    console.warn('[Sync] Realtime sync initialization notice:', e?.message);
   }
+}
+
+// Safe localStorage loader
+const loadInitialState = () => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (e: any) {
+    console.warn('Failed to parse cached CampOS state, using mock defaults:', e?.message);
+  }
+  return null;
+};
+
+export const useCampStore = create<CampStoreState>((set, get) => {
+  const cached = loadInitialState();
 
   const persist = (partial: Partial<CampStoreState>) => {
     if (typeof window !== 'undefined') {
@@ -192,7 +213,7 @@ export const useCampStore = create<CampStoreState>((set, get) => {
     trainingSessions: INITIAL_TRAINING_SESSIONS,
     weightTrajectories: MOCK_WEIGHT_TRAJECTORY,
     syncStatus: {
-      isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
+      isOnline: typeof window !== 'undefined' && typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean' ? navigator.onLine : true,
       lastSyncedAt: 'Just now',
       pendingCount: 0,
       syncMode: 'local',
@@ -212,8 +233,19 @@ export const useCampStore = create<CampStoreState>((set, get) => {
 
     authenticatePin: (pin: string, fighterId?: string) => {
       const targetId = fighterId || get().selectedFighterId;
+      const attempt = failedPinAttempts[targetId] || { count: 0, lockedUntil: 0 };
+
+      // B5: Lockout check
+      if (Date.now() < attempt.lockedUntil) {
+        console.warn(`[Auth: PIN] Fighter ${targetId} is locked out for ${Math.ceil((attempt.lockedUntil - Date.now()) / 1000)}s.`);
+        return false;
+      }
+
       const fighter = get().fighters.find((f) => f.id === targetId);
-      if (fighter && (fighter.pin === pin || pin === '1234')) {
+
+      // B5: Strict PIN authentication without universal 1234 backdoor
+      if (fighter && fighter.pin === pin) {
+        delete failedPinAttempts[targetId];
         set({
           isPinAuthenticated: true,
           activeFighterId: targetId,
@@ -221,6 +253,14 @@ export const useCampStore = create<CampStoreState>((set, get) => {
         });
         return true;
       }
+
+      // Record failed attempt
+      attempt.count += 1;
+      if (attempt.count >= 5) {
+        attempt.lockedUntil = Date.now() + 60000; // 60-second lockout
+        console.warn(`[Auth: PIN Lockout] Fighter ${targetId} locked out for 60 seconds after 5 failed attempts.`);
+      }
+      failedPinAttempts[targetId] = attempt;
       return false;
     },
 
@@ -239,7 +279,7 @@ export const useCampStore = create<CampStoreState>((set, get) => {
     setCheckInModalOpen: (open) => set({ isCheckInModalOpen: open }),
 
     submitDailyCheckIn: (data) => {
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
       const newCheckIn: CheckIn = {
         id: `ci_${Date.now()}`,
         fighterId: data.fighterId,
@@ -280,15 +320,30 @@ export const useCampStore = create<CampStoreState>((set, get) => {
         return f;
       });
 
-      // Update trajectory data with today's weigh-in
+      // Update trajectory data with today's weigh-in (S9)
+      const fighterObj = get().fighters.find((f) => f.id === data.fighterId);
+      const daysOut = fighterObj ? calculateDaysOut(fighterObj.fightDate) : 0;
+      const displayDate = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
       const fighterTrajectory = [...(get().weightTrajectories[data.fighterId] || [])];
-      const todayIndex = fighterTrajectory.findIndex((dp) => dp.date === 'Sep 03' || dp.daysOut === 9);
+      const todayIndex = fighterTrajectory.findIndex(
+        (dp) => dp.date === displayDate || dp.daysOut === daysOut
+      );
 
       if (todayIndex >= 0) {
         fighterTrajectory[todayIndex] = {
           ...fighterTrajectory[todayIndex],
           actualWeightLbs: data.weightLbs,
         };
+      } else {
+        fighterTrajectory.push({
+          date: displayDate,
+          daysOut,
+          targetWeightLbs: fighterObj ? fighterObj.divisionLimitLbs : data.weightLbs,
+          actualWeightLbs: data.weightLbs,
+          dangerZoneThresholdLbs: fighterObj ? fighterObj.divisionLimitLbs + 15 : data.weightLbs + 15,
+          isWaterCutPhase: daysOut <= 5,
+        });
+        fighterTrajectory.sort((a, b) => b.daysOut - a.daysOut);
       }
 
       const updatedTrajectories = {
@@ -320,9 +375,14 @@ export const useCampStore = create<CampStoreState>((set, get) => {
     },
 
     logCoachWeighIn: (fighterId, weightLbs, isEvening = false, notes) => {
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
+      const fighterObj = get().fighters.find((f) => f.id === fighterId);
+      const daysOut = fighterObj ? calculateDaysOut(fighterObj.fightDate) : 0;
+      const displayDate = new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
       const fighterTrajectory = [...(get().weightTrajectories[fighterId] || [])];
-      const todayIndex = fighterTrajectory.findIndex((dp) => dp.date === 'Sep 03' || dp.daysOut === 9);
+      const todayIndex = fighterTrajectory.findIndex(
+        (dp) => dp.date === displayDate || dp.daysOut === daysOut
+      );
 
       if (todayIndex >= 0) {
         fighterTrajectory[todayIndex] = {
@@ -330,6 +390,18 @@ export const useCampStore = create<CampStoreState>((set, get) => {
           [isEvening ? 'eveningWeightLbs' : 'actualWeightLbs']: weightLbs,
           notes: notes || fighterTrajectory[todayIndex].notes,
         };
+      } else {
+        fighterTrajectory.push({
+          date: displayDate,
+          daysOut,
+          targetWeightLbs: fighterObj ? fighterObj.divisionLimitLbs : weightLbs,
+          actualWeightLbs: !isEvening ? weightLbs : undefined,
+          eveningWeightLbs: isEvening ? weightLbs : undefined,
+          dangerZoneThresholdLbs: fighterObj ? fighterObj.divisionLimitLbs + 15 : weightLbs + 15,
+          isWaterCutPhase: daysOut <= 5,
+          notes,
+        });
+        fighterTrajectory.sort((a, b) => b.daysOut - a.daysOut);
       }
 
       const updatedFighters = get().fighters.map((f) => {
@@ -359,7 +431,7 @@ export const useCampStore = create<CampStoreState>((set, get) => {
     },
 
     updateHydrationLog: (fighterId, waterAddOz, electrolytesAdd = 0, urineScale) => {
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
       const currentLogs = [...get().hydrationLogs];
       const logIndex = currentLogs.findIndex((h) => h.fighterId === fighterId && h.date === today);
 
@@ -450,7 +522,7 @@ export const useCampStore = create<CampStoreState>((set, get) => {
     },
 
     syncAiSparringDebrief: (fighterId, roundNumber, feedbackSummary, drills) => {
-      const today = new Date().toISOString().split('T')[0];
+      const today = getLocalDateString();
       const sessions = [...get().trainingSessions];
       const existingIdx = sessions.findIndex((s) => s.fighterId === fighterId && s.type === 'sparring' && s.date === today);
 
@@ -506,6 +578,7 @@ export const useCampStore = create<CampStoreState>((set, get) => {
       });
     },
 
+    // Reset full state slice (N7)
     resetToDefaultData: () => {
       if (typeof window !== 'undefined') {
         localStorage.removeItem(STORAGE_KEY);
@@ -516,6 +589,24 @@ export const useCampStore = create<CampStoreState>((set, get) => {
         hydrationLogs: INITIAL_HYDRATION,
         trainingSessions: INITIAL_TRAINING_SESSIONS,
         weightTrajectories: MOCK_WEIGHT_TRAJECTORY,
+        weightUnit: 'lbs',
+        currentRole: 'coach',
+        isPinAuthenticated: false,
+        activeFighterId: null,
+        selectedFighterId: 'f1',
+        activeJobs: [],
+        completedJobs: [],
+        selectedCompletedJobId: null,
+        isCutSheetOpen: false,
+        isWeighInModalOpen: false,
+        isCheckInModalOpen: false,
+        syncStatus: {
+          isOnline: true,
+          lastSyncedAt: 'Just now',
+          pendingCount: 0,
+          syncMode: 'local',
+        },
+        offlineQueue: [],
       });
       sendBroadcast('STATE_UPDATED', {});
     },
@@ -563,6 +654,18 @@ export const useCampStore = create<CampStoreState>((set, get) => {
     },
 
     dismissJob: (jobId) => {
+      set((state) => ({
+        activeJobs: state.activeJobs.filter((j) => j.jobId !== jobId),
+        completedJobs: state.completedJobs.filter((j) => j.jobId !== jobId),
+      }));
+    },
+
+    cancelJob: async (jobId) => {
+      try {
+        await fetch(`/api/v1/mma/jobs?jobId=${jobId}`, { method: 'DELETE' });
+      } catch (e) {
+        console.warn('[CampStore] Notice calling cancel job API:', e);
+      }
       set((state) => ({
         activeJobs: state.activeJobs.filter((j) => j.jobId !== jobId),
         completedJobs: state.completedJobs.filter((j) => j.jobId !== jobId),

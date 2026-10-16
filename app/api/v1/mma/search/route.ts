@@ -1,32 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { mmaVectorSearchService } from '@/lib/vector/qdrant-service';
 import { generateEmbedding } from '@/lib/vector/embeddings';
-import { SearchRequest } from '@/types/video-search';
+import { requireAuth, checkRateLimit, getClientIp, handleApiError } from '@/lib/auth/api-guard';
+import { validateSearchRequest } from '@/lib/validation/api-schemas';
 
 export async function POST(request: NextRequest) {
+  const auth = requireAuth(request);
+  if (!auth.authorized) return auth.response!;
+
+  const ip = getClientIp(request);
+  if (!checkRateLimit(`search_${ip}`, 60, 1.0)) {
+    return NextResponse.json(
+      { error: 'Search rate limit exceeded. Please wait a moment.' },
+      { status: 429 }
+    );
+  }
+
   const startTime = Date.now();
   console.log('───────────────────────────────────────────────────────');
-  console.log('[API: /api/v1/mma/search] Semantic query request received at', new Date().toISOString());
+  console.log('[API: /api/v1/mma/search] Vector query request received at', new Date().toISOString());
 
   try {
-    const body: SearchRequest = await request.json();
+    const rawBody = await request.json();
+    const validation = validateSearchRequest(rawBody);
 
-    if (!body || typeof body.query_text !== 'string') {
-      console.warn('[API: /api/v1/mma/search] 400 Bad Request: Missing or invalid query_text');
+    if (!validation.isValid || !validation.data) {
+      console.warn('[API: /api/v1/mma/search] 400 Bad Request:', validation.error);
       return NextResponse.json(
-        { error: 'Invalid search request. "query_text" string is required.' },
+        { error: validation.error || 'Invalid search parameters.' },
         { status: 400 }
       );
     }
 
-    const queryText = body.query_text.trim();
-    if (!queryText) {
-      console.warn('[API: /api/v1/mma/search] 400 Bad Request: Empty query_text');
-      return NextResponse.json(
-        { error: '"query_text" must not be empty.' },
-        { status: 400 }
-      );
-    }
+    const body = validation.data;
+    const queryText = body.query_text;
 
     console.log('[API: /api/v1/mma/search] Parsed parameters:', {
       query: queryText,
@@ -37,12 +44,11 @@ export async function POST(request: NextRequest) {
       limit: body.limit || 10,
     });
 
-    // 1. Vectorize natural language query into 384-dimensional dense embedding
+    // 1. Vectorize query into 384-dimensional dense embedding
     const queryVector = generateEmbedding(queryText);
-    console.log(`[API: /api/v1/mma/search] Vectorized query text into ${queryVector.length}-dimensional dense embedding.`);
 
-    // 2. Query Qdrant vector layer with payload filters and similarity search
-    const searchLimit = body.limit && body.limit > 0 && body.limit <= 50 ? body.limit : 10;
+    // 2. Query vector layer with payload filters and similarity search
+    const searchLimit = body.limit || 10;
     const response = await mmaVectorSearchService.search_techniques(queryVector, body, searchLimit);
 
     const elapsed = Date.now() - startTime;
@@ -57,15 +63,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(response, { status: 200 });
   } catch (error: any) {
-    const elapsed = Date.now() - startTime;
-    console.error(`[API: /api/v1/mma/search] Vector search failed after ${elapsed}ms:`, error);
-    console.log('───────────────────────────────────────────────────────');
-    return NextResponse.json(
-      { 
-        error: 'Vector search query failed.', 
-        details: error?.message || 'Unknown internal error' 
-      },
-      { status: 500 }
-    );
+    return handleApiError('/api/v1/mma/search', error, 'Vector search query failed.');
   }
 }

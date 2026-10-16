@@ -30,7 +30,16 @@ export const Header: React.FC = () => {
     setSelectedFighterId
   } = useCampStore();
 
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
   const activeFighter = fighters.find(f => f.id === selectedFighterId) || fighters[0];
+  const role = mounted ? currentRole : 'coach';
+  const unit = mounted ? weightUnit : 'lbs';
+  const fighter = mounted ? activeFighter : fighters[0];
+  const isOnline = mounted ? syncStatus.isOnline : true;
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-zinc-800/80 bg-[#09090b]/90 backdrop-blur-md px-4 lg:px-8 py-3">
@@ -58,9 +67,9 @@ export const Header: React.FC = () => {
           <div className="hidden xl:flex items-center border-l border-zinc-800 pl-4 space-x-2 text-xs">
             <span className="inline-block h-2 w-2 rounded-full bg-red-500 animate-pulse" />
             <span className="text-zinc-400">Active Camp:</span>
-            <span className="font-semibold text-zinc-200">{activeFighter.event}</span>
+            <span className="font-semibold text-zinc-200">{fighter.event}</span>
             <span className="text-zinc-500">•</span>
-            <span className="text-zinc-400">vs. {activeFighter.opponent}</span>
+            <span className="text-zinc-400">vs. {fighter.opponent}</span>
           </div>
         </div>
 
@@ -69,7 +78,7 @@ export const Header: React.FC = () => {
           <button
             onClick={() => setRole('coach')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              currentRole === 'coach'
+              role === 'coach'
                 ? 'bg-red-600 text-white shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
             }`}
@@ -81,7 +90,7 @@ export const Header: React.FC = () => {
           <button
             onClick={() => setRole('fighter')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              currentRole === 'fighter'
+              role === 'fighter'
                 ? 'bg-red-600 text-white shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
             }`}
@@ -93,7 +102,7 @@ export const Header: React.FC = () => {
           <button
             onClick={() => setRole('analyzer')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              currentRole === 'analyzer'
+              role === 'analyzer'
                 ? 'bg-red-600 text-white shadow-sm'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
             }`}
@@ -107,7 +116,7 @@ export const Header: React.FC = () => {
         <div className="flex items-center space-x-2 sm:space-x-3">
           
           {/* Quick Weigh-In Button (Coach only) */}
-          {currentRole === 'coach' && (
+          {role === 'coach' && (
             <button
               onClick={() => setWeighInModalOpen(true)}
               className="flex items-center space-x-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 hover:border-red-500/50 text-zinc-200 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
@@ -134,17 +143,18 @@ export const Header: React.FC = () => {
             className="flex items-center space-x-1 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs font-mono font-bold text-zinc-300 hover:bg-zinc-800 hover:text-white transition-colors"
             title="Toggle between Pounds (lbs) and Kilograms (kg)"
           >
-            <span className={weightUnit === 'lbs' ? 'text-red-400' : 'text-zinc-500'}>LBS</span>
+            <span className={unit === 'lbs' ? 'text-red-400' : 'text-zinc-500'}>LBS</span>
             <span className="text-zinc-600">/</span>
-            <span className={weightUnit === 'kg' ? 'text-red-400' : 'text-zinc-500'}>KG</span>
+            <span className={unit === 'kg' ? 'text-red-400' : 'text-zinc-500'}>KG</span>
           </button>
 
           {/* Sync & Offline Status */}
           <div 
+            suppressHydrationWarning
             className="flex items-center space-x-1.5 rounded-lg border border-zinc-800/80 bg-zinc-900/60 px-2.5 py-1.5 text-xs text-zinc-400"
             title="Sync status: Real-time broadcast and Gym Floor Local-First Cache active"
           >
-            {syncStatus.isOnline ? (
+            {isOnline ? (
               <>
                 <span className="relative flex h-2 w-2">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>

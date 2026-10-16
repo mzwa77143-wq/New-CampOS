@@ -47,13 +47,15 @@ export default function Home() {
     };
   }, [syncOfflineQueue]);
 
+  const activeRole = mounted ? currentRole : 'coach';
+
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100 flex flex-col">
       <Header />
       <div className="flex-1">
-        {currentRole === 'coach' ? (
+        {activeRole === 'coach' ? (
           <CoachDashboard />
-        ) : currentRole === 'fighter' ? (
+        ) : activeRole === 'fighter' ? (
           <FighterApp />
         ) : (
           <MMAVideoAnalyzer />

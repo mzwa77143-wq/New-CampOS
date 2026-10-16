@@ -1,25 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAnalysisJob, runBackgroundAnalysis } from '@/lib/ai/video-jobs';
-import { SparringUploadMetadata } from '@/types/sparring-analysis';
+import { requireAuth, checkRateLimit, getClientIp, handleApiError } from '@/lib/auth/api-guard';
+import { validateSparringAnalysisRequest } from '@/lib/validation/api-schemas';
 
 export async function POST(request: NextRequest) {
+  const auth = requireAuth(request);
+  if (!auth.authorized) return auth.response!;
+
+  const ip = getClientIp(request);
+  if (!checkRateLimit(`sparring_${ip}`, 15, 0.2)) {
+    return NextResponse.json(
+      { error: 'AI analysis quota rate limit reached. Please wait a moment before launching new sessions.' },
+      { status: 429 }
+    );
+  }
+
   const startTime = Date.now();
   console.log('───────────────────────────────────────────────────────');
   console.log('[API: /api/v1/mma/sparring-analysis] Async analysis request received at', new Date().toISOString());
 
   try {
-    const body = await request.json();
-    const metadata: SparringUploadMetadata = body.metadata || body;
-    const duration = typeof body.duration === 'number' ? body.duration : 30;
-    const frames: string[] | undefined = Array.isArray(body.frames) ? body.frames : undefined;
+    const rawBody = await request.json();
+    const validation = validateSparringAnalysisRequest(rawBody);
 
-    if (!metadata || !metadata.fighterId) {
-      console.warn('[API: /api/v1/mma/sparring-analysis] 400 Bad Request: Missing fighterId');
+    if (!validation.isValid || !validation.data) {
+      console.warn('[API: /api/v1/mma/sparring-analysis] 400 Bad Request:', validation.error);
       return NextResponse.json(
-        { error: 'Invalid sparring request. "fighterId" is required.' },
+        { error: validation.error || 'Invalid sparring analysis request.' },
         { status: 400 }
       );
     }
+
+    const { metadata, duration, frames } = validation.data;
 
     // 1. Enqueue job into asynchronous background processing engine
     const job = createAnalysisJob({
@@ -52,15 +64,6 @@ export async function POST(request: NextRequest) {
       { status: 202 }
     );
   } catch (error: any) {
-    const elapsed = Date.now() - startTime;
-    console.error(`[API: /api/v1/mma/sparring-analysis] Ingestion error after ${elapsed}ms:`, error);
-    console.log('───────────────────────────────────────────────────────');
-    return NextResponse.json(
-      { 
-        error: 'Failed to enqueue sparring video analysis.', 
-        details: error?.message || 'Unknown internal error' 
-      },
-      { status: 500 }
-    );
+    return handleApiError('/api/v1/mma/sparring-analysis', error, 'Failed to enqueue sparring video analysis.');
   }
 }

@@ -48,6 +48,7 @@ export interface AgenticInsight {
   endTimestampMs?: number;
   severity: 'critical' | 'warning' | 'advisory';
   impactMetric?: string;
+  phase?: 'Early Round' | 'Mid-Round' | 'Late Round';
 }
 
 export interface ActionItem {
@@ -68,6 +69,7 @@ export interface BiomechanicalFlaw {
   observation: string;
   correction: string;
   jointAngleImpact?: string;
+  phase?: 'Early Round' | 'Mid-Round' | 'Late Round';
 }
 
 export interface KeyMoment {

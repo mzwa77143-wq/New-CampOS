@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useCampStore } from '@/lib/store';
 import { TrainingSession, TrainingType } from '@/types/camp';
+import { getLocalDateString } from '@/lib/utils';
 import { 
   Calendar, 
   Clock, 
@@ -48,7 +49,7 @@ export const TrainingSchedulePlanner: React.FC = () => {
 
     addTrainingSession({
       fighterId: selectedFighterId,
-      date: new Date().toISOString().split('T')[0],
+      date: getLocalDateString(),
       time: newTime,
       title: newTitle,
       type: newType,

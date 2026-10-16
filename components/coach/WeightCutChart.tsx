@@ -27,6 +27,11 @@ export const WeightCutChart: React.FC = () => {
     setCutSheetOpen 
   } = useCampStore();
 
+  const [hasMounted, setHasMounted] = React.useState(false);
+  React.useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
   const fighter = fighters.find((f) => f.id === selectedFighterId) || fighters[0];
   const chartData = useMemo(() => {
     const rawTrajectory = weightTrajectories[selectedFighterId] || [];
@@ -200,95 +205,105 @@ export const WeightCutChart: React.FC = () => {
 
       {/* Chart Canvas */}
       <div className="h-64 sm:h-72 w-full pt-2">
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-            <defs>
-              <linearGradient id="actualGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#ef4444" stopOpacity={0.4} />
-                <stop offset="95%" stopColor="#ef4444" stopOpacity={0.0} />
-              </linearGradient>
-            </defs>
+        {hasMounted ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+              <defs>
+                <linearGradient id="actualGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.4} />
+                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0.0} />
+                </linearGradient>
+              </defs>
 
-            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
 
-            <XAxis 
-              dataKey="date" 
-              stroke="#71717a" 
-              fontSize={11} 
-              tickLine={false} 
-              axisLine={{ stroke: '#27272a' }}
-            />
+              <XAxis 
+                dataKey="date" 
+                stroke="#71717a" 
+                fontSize={11} 
+                tickLine={false} 
+                axisLine={{ stroke: '#27272a' }}
+              />
 
-            <YAxis 
-              domain={[minVal, maxVal]} 
-              stroke="#71717a" 
-              fontSize={11} 
-              tickLine={false} 
-              axisLine={{ stroke: '#27272a' }}
-              tickFormatter={(v) => `${v}`}
-            />
+              <YAxis 
+                domain={[minVal, maxVal]} 
+                stroke="#71717a" 
+                fontSize={11} 
+                tickLine={false} 
+                axisLine={{ stroke: '#27272a' }}
+                tickFormatter={(v) => `${v}`}
+              />
 
-            <Tooltip content={<CustomTooltip />} />
+              <Tooltip content={<CustomTooltip />} />
 
-            {/* Official Division Weight Limit Line */}
-            <ReferenceLine 
-              y={convertLbsToCurrent(fighter.divisionLimitLbs, weightUnit)} 
-              stroke="#10b981" 
-              strokeDasharray="4 4"
-              label={{ 
-                value: `Limit: ${formatWeight(fighter.divisionLimitLbs, weightUnit)}`, 
-                fill: '#10b981', 
-                fontSize: 10, 
-                position: 'insideBottomRight' 
-              }} 
-            />
+              {/* Official Division Weight Limit Line */}
+              <ReferenceLine 
+                y={convertLbsToCurrent(fighter.divisionLimitLbs, weightUnit)} 
+                stroke="#10b981" 
+                strokeDasharray="4 4"
+                label={{ 
+                  value: `Limit: ${formatWeight(fighter.divisionLimitLbs, weightUnit)}`, 
+                  fill: '#10b981', 
+                  fontSize: 10, 
+                  position: 'insideBottomRight' 
+                }} 
+              />
 
-            {/* Danger Zone Ceiling Line */}
-            <Line 
-              type="monotone" 
-              dataKey="danger" 
-              stroke="#7f1d1d" 
-              strokeWidth={1.5} 
-              strokeDasharray="3 3" 
-              dot={false}
-              name="Danger Threshold"
-            />
+              {/* Danger Zone: >8% Water Depletion Alert Line */}
+              <ReferenceLine 
+                y={convertLbsToCurrent(fighter.walkoutWeightLbs * 0.915, weightUnit)} 
+                stroke="#991b1b" 
+                strokeDasharray="2 2"
+              />
 
-            {/* Target Trajectory Slope */}
-            <Line 
-              type="monotone" 
-              dataKey="target" 
-              stroke="#a1a1aa" 
-              strokeWidth={2} 
-              strokeDasharray="5 5" 
-              dot={false}
-              name="Target Slope"
-            />
+              {/* Fight Week Water Loading Zone */}
+              <ReferenceArea 
+                x1="Day -5 (Mon)" 
+                x2="Day 0 (Sat)" 
+                fill="#06b6d4" 
+                fillOpacity={0.05} 
+              />
 
-            {/* Actual Weigh-In Area & Line */}
-            <Area 
-              type="monotone" 
-              dataKey="actual" 
-              stroke="#ef4444" 
-              strokeWidth={3} 
-              fillOpacity={1} 
-              fill="url(#actualGradient)" 
-              dot={{ r: 4, fill: '#ef4444', stroke: '#ffffff', strokeWidth: 2 }}
-              activeDot={{ r: 6, fill: '#ffffff', stroke: '#ef4444', strokeWidth: 3 }}
-              name="Morning Actual"
-            />
+              {/* Target Cut Trajectory */}
+              <Line 
+                type="monotone" 
+                dataKey="target" 
+                stroke="#a1a1aa" 
+                strokeWidth={2} 
+                strokeDasharray="5 5" 
+                dot={false}
+                name="Target Plan"
+              />
 
-            {/* Evening Weigh-Ins */}
-            <Line 
-              type="monotone" 
-              dataKey="evening" 
-              stroke="#f97316" 
-              strokeWidth={2} 
-              dot={{ r: 3, fill: '#f97316', stroke: '#09090b', strokeWidth: 1 }}
-              name="Evening Scale"
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
+              {/* Actual Logged Scale Weigh-ins (Filled Area) */}
+              <Area 
+                type="monotone" 
+                dataKey="actual" 
+                stroke="#ef4444" 
+                strokeWidth={3} 
+                fill="url(#actualGradient)" 
+                connectNulls={false}
+                dot={{ r: 4, fill: '#ef4444', stroke: '#09090b', strokeWidth: 2 }}
+                activeDot={{ r: 6, fill: '#f87171', stroke: '#fff', strokeWidth: 2 }}
+                name="Morning Scale"
+              />
+
+              {/* Evening Scale Weigh-ins */}
+              <Line 
+                type="monotone" 
+                dataKey="evening" 
+                stroke="#f97316" 
+                strokeWidth={2} 
+                dot={{ r: 3, fill: '#f97316', stroke: '#09090b', strokeWidth: 1 }}
+                name="Evening Scale"
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="h-full w-full flex items-center justify-center bg-zinc-950/40 rounded-xl border border-zinc-900 animate-pulse">
+            <span className="text-xs font-mono text-zinc-500">Loading weight trajectory telemetry...</span>
+          </div>
+        )}
       </div>
 
       {/* Legend & Water Cut Phase Indicator */}

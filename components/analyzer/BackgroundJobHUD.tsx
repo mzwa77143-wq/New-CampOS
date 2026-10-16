@@ -23,11 +23,17 @@ export const BackgroundJobHUD: React.FC = () => {
     completedJobs, 
     updateJob, 
     dismissJob, 
+    cancelJob,
     setSelectedCompletedJobId, 
     fetchActiveJobs 
   } = useCampStore();
 
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
+  const [hasMounted, setHasMounted] = useState<boolean>(false);
+
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
 
   // Poll server for live progress on active jobs
   const pollActiveJobs = useCallback(async () => {
@@ -62,6 +68,8 @@ export const BackgroundJobHUD: React.FC = () => {
 
     return () => clearInterval(interval);
   }, [activeJobs.length, pollActiveJobs]);
+
+  if (!hasMounted) return null;
 
   const totalJobsCount = activeJobs.length + completedJobs.length;
   if (totalJobsCount === 0) return null;
@@ -116,9 +124,19 @@ export const BackgroundJobHUD: React.FC = () => {
                       {job.fighterName} &bull; R{job.roundNumber}
                     </span>
                   </div>
-                  <span className="text-red-400 font-bold text-[11px]">
-                    {job.progress}%
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-red-400 font-bold text-[11px]">
+                      {job.progress}%
+                    </span>
+                    <button
+                      onClick={() => cancelJob(job.jobId)}
+                      className="px-2 py-0.5 rounded bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-300 hover:text-white text-[10px] font-bold transition-all flex items-center gap-1 active:scale-95"
+                      title="Cancel in-progress upload & analysis"
+                    >
+                      <X className="h-3 w-3" />
+                      <span>Cancel</span>
+                    </button>
+                  </div>
                 </div>
 
                 {/* Progress bar */}

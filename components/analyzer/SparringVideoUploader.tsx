@@ -31,7 +31,8 @@ import {
   Compass,
   Trash2,
   Film,
-  HardDrive
+  HardDrive,
+  X
 } from 'lucide-react';
 import { UploadedVideoRecord } from '@/lib/db/video-db';
 
@@ -43,10 +44,13 @@ export const SparringVideoUploader: React.FC = () => {
     selectedFighterId, 
     syncAiSparringDebrief,
     trackJob,
+    cancelJob,
     completedJobs,
     selectedCompletedJobId,
     setSelectedCompletedJobId 
   } = useCampStore();
+
+  const uploadAbortControllerRef = useRef<AbortController | null>(null);
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoFileName, setVideoFileName] = useState<string | null>(null);
@@ -98,9 +102,38 @@ export const SparringVideoUploader: React.FC = () => {
     fetchStoredVideos();
   }, []);
 
+  const handleCancelUpload = () => {
+    if (uploadAbortControllerRef.current) {
+      console.log('[Sparring Uploader] Aborting in-progress video upload...');
+      uploadAbortControllerRef.current.abort();
+      uploadAbortControllerRef.current = null;
+    }
+    setIsUploadingToDb(false);
+    setDbUploadStatus('Upload cancelled by user');
+  };
+
+  const handleCancelAnalysis = async () => {
+    if (activeJobId) {
+      console.log('[Sparring Uploader] Cancelling in-progress analysis job:', activeJobId);
+      await cancelJob(activeJobId);
+      setActiveJobId(null);
+    }
+    setIsAnalyzing(false);
+    setJobProgress(0);
+    setAnalysisStep('Upload and analysis cancelled by user.');
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    // If an upload is currently in progress, cancel it before starting new one
+    if (uploadAbortControllerRef.current) {
+      uploadAbortControllerRef.current.abort();
+    }
+
+    const abortController = new AbortController();
+    uploadAbortControllerRef.current = abortController;
 
     console.log('[Sparring Uploader: Video Selected]', {
       name: file.name,
@@ -113,6 +146,18 @@ export const SparringVideoUploader: React.FC = () => {
     setVideoFileName(file.name);
     setFeedback(null);
     setIsSyncedToCamp(false);
+
+    // Immediately probe video duration using an offscreen video element
+    const tempVideo = document.createElement('video');
+    tempVideo.preload = 'metadata';
+    tempVideo.src = localUrl;
+    tempVideo.onloadedmetadata = () => {
+      if (tempVideo.duration && !isNaN(tempVideo.duration) && tempVideo.duration > 0) {
+        const detectedDur = Math.round(tempVideo.duration);
+        setDuration(detectedDur);
+        console.log(`[Sparring Uploader: Video Probe] Detected video duration: ${detectedDur}s (${(detectedDur / 60).toFixed(1)} mins)`);
+      }
+    };
 
     // Upload and persist to video database
     setIsUploadingToDb(true);
@@ -129,6 +174,7 @@ export const SparringVideoUploader: React.FC = () => {
       const res = await fetch('/api/v1/mma/videos/upload', {
         method: 'POST',
         body: formData,
+        signal: abortController.signal,
       });
 
       if (res.ok) {
@@ -142,11 +188,19 @@ export const SparringVideoUploader: React.FC = () => {
       } else {
         setDbUploadStatus('Saved locally for preview');
       }
-    } catch (err) {
-      console.warn('[Sparring Uploader: DB Upload Notice]', err);
-      setDbUploadStatus('Saved locally for preview');
+    } catch (err: any) {
+      if (err.name === 'AbortError' || abortController.signal.aborted) {
+        console.log('[Sparring Uploader] Video upload cancelled by user.');
+        setDbUploadStatus('Upload cancelled by user');
+      } else {
+        console.warn('[Sparring Uploader: DB Upload Notice]', err);
+        setDbUploadStatus('Saved locally for preview');
+      }
     } finally {
-      setIsUploadingToDb(false);
+      if (uploadAbortControllerRef.current === abortController) {
+        uploadAbortControllerRef.current = null;
+        setIsUploadingToDb(false);
+      }
     }
   };
 
@@ -190,41 +244,77 @@ export const SparringVideoUploader: React.FC = () => {
     setFeedback(null);
     setIsSyncedToCamp(false);
 
-    // Realistic multi-stage vision pipeline progression
-    setAnalysisStep('Ingesting video frames and normalizing resolution...');
-    await new Promise((r) => setTimeout(r, 450));
+    // Progressive 30-second chunk slicing across full video duration
+    const totalDur = duration > 0 ? duration : 30;
+    const CHUNK_SIZE = 30;
+    const numChunks = Math.max(1, Math.ceil(totalDur / CHUNK_SIZE));
+    setAnalysisStep(`Splicing video into ${numChunks} progressive 30s chunks (${totalDur}s full round)...`);
 
-    // Extract visual frame snapshot from client video if available
-    const capturedFrames: string[] = [];
+    // Extract chronological visual frame snapshots across each 30s chunk
+    const capturedFrames: { timestampSeconds: number; base64: string }[] = [];
     if (videoRef.current) {
       try {
+        const videoEl = videoRef.current;
+        const origTime = videoEl.currentTime;
         const canvas = document.createElement('canvas');
         canvas.width = 480;
         canvas.height = 270;
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-          capturedFrames.push(canvas.toDataURL('image/jpeg', 0.8));
+          const framesPerChunk = numChunks > 4 ? 3 : 4;
+          for (let c = 0; c < numChunks; c++) {
+            const chunkStart = c * CHUNK_SIZE;
+            const chunkEnd = Math.min(totalDur, (c + 1) * CHUNK_SIZE);
+            const chunkLength = chunkEnd - chunkStart;
+
+            for (let f = 0; f < framesPerChunk; f++) {
+              const pct = (f + 0.5) / framesPerChunk;
+              const targetSec = parseFloat((chunkStart + pct * chunkLength).toFixed(1));
+              await new Promise<void>((resolve) => {
+                const onSeeked = () => {
+                  videoEl.removeEventListener('seeked', onSeeked);
+                  resolve();
+                };
+                videoEl.addEventListener('seeked', onSeeked);
+                videoEl.currentTime = targetSec;
+                setTimeout(() => {
+                  videoEl.removeEventListener('seeked', onSeeked);
+                  resolve();
+                }, 200);
+              });
+              try {
+                ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+                capturedFrames.push({
+                  timestampSeconds: targetSec,
+                  base64: canvas.toDataURL('image/jpeg', 0.75),
+                });
+              } catch (canvasErr) {
+                // Cross-origin safe fallback
+              }
+            }
+          }
+          videoEl.currentTime = origTime;
         }
       } catch (e) {
-        // Safe catch for canvas cross-origin
+        console.warn('Temporal chunk frame sampling notice:', e);
       }
     }
 
     console.log('[Sparring Uploader: Start Pipeline]', {
       fighterId,
       roundNumber,
-      duration: duration || 30,
+      duration: totalDur,
+      chunksCount: numChunks,
       partnerStyle,
       intensity,
-      framesExtracted: capturedFrames.length,
+      temporalFramesExtracted: capturedFrames.length,
       videoFileName,
     });
 
-    setAnalysisStep('Extracting skeletal keypoints & joint angles...');
+    setAnalysisStep(`Normalizing ${capturedFrames.length} keyframes across ${numChunks} progressive chunks...`);
     await new Promise((r) => setTimeout(r, 450));
 
-    setAnalysisStep('Streaming visual telemetry to Google Gemini Multimodal AI...');
+    setAnalysisStep(`Streaming ${numChunks} spliced chunks to Gemini Multimodal Combat Intelligence...`);
 
     try {
       console.log('[Sparring Uploader: Request] Calling POST /api/v1/mma/sparring-analysis (Async Dispatch)...');
@@ -235,13 +325,13 @@ export const SparringVideoUploader: React.FC = () => {
           metadata: {
             fighterId,
             roundNumber,
-            roundDurationSeconds: duration || 30,
+            roundDurationSeconds: totalDur,
             sparringPartnerStyle: partnerStyle,
             intensity,
             videoFileName,
             videoUrl: videoUrl || undefined,
           },
-          duration: duration || 30,
+          duration: totalDur,
           frames: capturedFrames.length > 0 ? capturedFrames : undefined,
         }),
       });
@@ -336,6 +426,18 @@ export const SparringVideoUploader: React.FC = () => {
     if (videoRef.current) {
       videoRef.current.currentTime = sec;
       setCurrentTime(sec);
+      videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+    }
+  };
+
+  const seekWithSlowMo = (sec: number) => {
+    console.log(`[Sparring Uploader: Slow-Mo Scrub] Seeking video to ${sec.toFixed(1)}s in 0.5x slow-motion`);
+    if (videoRef.current) {
+      const seekTime = Math.max(0, sec - 1.2);
+      videoRef.current.currentTime = seekTime;
+      setCurrentTime(seekTime);
+      setPlaybackSpeed(0.5);
+      videoRef.current.playbackRate = 0.5;
       videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
     }
   };
@@ -481,9 +583,24 @@ export const SparringVideoUploader: React.FC = () => {
                 Supports MP4, MOV, WebM &bull; Automatically saved to video database &amp; storage
               </span>
               {isUploadingToDb && (
-                <div className="mt-3 flex items-center gap-2 text-xs font-mono text-cyan-400 bg-cyan-950/60 px-3 py-1.5 rounded-xl border border-cyan-800 animate-pulse">
-                  <Activity className="h-3.5 w-3.5 animate-spin" />
-                  <span>Saving video to database &amp; storage...</span>
+                <div className="mt-3 flex items-center gap-3 text-xs font-mono">
+                  <div className="flex items-center gap-2 text-cyan-400 bg-cyan-950/60 px-3 py-1.5 rounded-xl border border-cyan-800 animate-pulse">
+                    <Activity className="h-3.5 w-3.5 animate-spin" />
+                    <span>Saving video to database &amp; storage...</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      handleCancelUpload();
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-950/90 hover:bg-red-900 border border-red-700 text-red-300 hover:text-white font-bold transition-all active:scale-95 shadow-sm"
+                    title="Cancel in-progress video upload"
+                  >
+                    <X className="h-3.5 w-3.5 text-red-400" />
+                    <span>Cancel Upload</span>
+                  </button>
                 </div>
               )}
             </label>
@@ -511,6 +628,18 @@ export const SparringVideoUploader: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
+                {isUploadingToDb && (
+                  <button
+                    type="button"
+                    onClick={handleCancelUpload}
+                    className="px-3.5 py-2 rounded-xl bg-red-950/90 hover:bg-red-900 border border-red-700 text-red-300 hover:text-white text-xs font-mono font-bold transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
+                    title="Cancel in-progress video upload"
+                  >
+                    <X className="h-3.5 w-3.5 text-red-400" />
+                    <span>Cancel Upload</span>
+                  </button>
+                )}
+
                 <label className="px-3 py-2 rounded-xl bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono text-zinc-400 hover:text-white cursor-pointer transition-all">
                   <span>Replace Video</span>
                   <input
@@ -555,6 +684,18 @@ export const SparringVideoUploader: React.FC = () => {
               <p className="text-xs text-zinc-300 font-mono">
                 {analysisStep}
               </p>
+
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-2 mt-1">
+                <button
+                  type="button"
+                  onClick={handleCancelAnalysis}
+                  className="px-4 py-2 rounded-xl bg-red-950/90 hover:bg-red-900 border border-red-700 hover:border-red-500 text-red-300 hover:text-white text-xs font-mono font-bold transition-all flex items-center gap-1.5 shadow-glow-red active:scale-95"
+                  title="Cancel in-progress upload and background analysis"
+                >
+                  <X className="h-4 w-4 text-red-400" />
+                  <span>Cancel In-Progress Upload / Analysis</span>
+                </button>
+              </div>
 
               <div className="text-[11px] text-zinc-400 font-mono bg-zinc-900/80 px-3 py-1.5 rounded-xl border border-zinc-800 flex items-center gap-2 mt-1">
                 <Sparkles className="h-3.5 w-3.5 text-amber-400 shrink-0" />
@@ -695,12 +836,12 @@ export const SparringVideoUploader: React.FC = () => {
                 </div>
               </div>
 
-              {/* Timeline Slider */}
-              <div className="space-y-1">
+              {/* Timeline Slider with Interactive Heatmap Ticks */}
+              <div className="relative w-full py-2">
                 <input
                   type="range"
                   min="0"
-                  max={duration}
+                  max={duration || 1}
                   step="0.1"
                   value={currentTime}
                   onChange={(e) => {
@@ -708,8 +849,88 @@ export const SparringVideoUploader: React.FC = () => {
                     if (videoRef.current) videoRef.current.currentTime = newTime;
                     setCurrentTime(newTime);
                   }}
-                  className="w-full accent-red-500"
+                  className="w-full accent-red-500 relative z-20 cursor-pointer"
                 />
+
+                {/* Timeline Heatmap Ticks Bar */}
+                {duration > 0 && feedback && (
+                  <div className="relative w-full h-3 -mt-1 z-30 pointer-events-none">
+                    {/* Render Flaws Markers (Red = Critical, Amber = Warning) */}
+                    {feedback.flaws.map((flaw) => {
+                      const pct = Math.min(100, Math.max(0, (flaw.timestampSeconds / duration) * 100));
+                      const isCritical = flaw.severity === 'critical';
+                      return (
+                        <div
+                          key={`marker-${flaw.id}`}
+                          style={{ left: `${pct}%` }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            seekWithSlowMo(flaw.timestampSeconds);
+                          }}
+                          className="absolute -top-1.5 -translate-x-1/2 pointer-events-auto cursor-pointer group"
+                          title={`${formatSec(flaw.timestampSeconds)} - ${flaw.title} (${flaw.severity})`}
+                        >
+                          <span
+                            className={`block w-2.5 h-2.5 rounded-full border border-black shadow-md transition-transform group-hover:scale-150 ${
+                              isCritical ? 'bg-red-500 animate-pulse' : 'bg-amber-400'
+                            }`}
+                          />
+                          {/* Tooltip on hover */}
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:flex flex-col items-center z-50 pointer-events-none whitespace-nowrap">
+                            <div className="bg-zinc-900/95 border border-zinc-700 text-white text-[10px] font-mono px-2 py-1 rounded-lg shadow-2xl flex items-center gap-1.5">
+                              <span className={`w-1.5 h-1.5 rounded-full ${isCritical ? 'bg-red-500' : 'bg-amber-400'}`} />
+                              <span className="font-bold text-red-400">{formatSec(flaw.timestampSeconds)}</span>
+                              <span>{flaw.title}</span>
+                              <span className="text-[9px] text-zinc-400 font-bold bg-zinc-800 px-1 rounded">0.5x Play</span>
+                            </div>
+                            <div className="w-1.5 h-1.5 bg-zinc-900 rotate-45 border-r border-b border-zinc-700 -mt-1" />
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {/* Render Key Moments Markers (Green) */}
+                    {feedback.keyMoments.map((km) => {
+                      const pct = Math.min(100, Math.max(0, (km.timestampSeconds / duration) * 100));
+                      return (
+                        <div
+                          key={`km-marker-${km.id}`}
+                          style={{ left: `${pct}%` }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            seekWithSlowMo(km.timestampSeconds);
+                          }}
+                          className="absolute -top-1.5 -translate-x-1/2 pointer-events-auto cursor-pointer group"
+                          title={`${formatSec(km.timestampSeconds)} - ${km.title}`}
+                        >
+                          <span className="block w-2.5 h-2.5 rounded-full bg-emerald-400 border border-black shadow-md transition-transform group-hover:scale-150" />
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:flex flex-col items-center z-50 pointer-events-none whitespace-nowrap">
+                            <div className="bg-zinc-900/95 border border-zinc-700 text-white text-[10px] font-mono px-2 py-1 rounded-lg shadow-2xl flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                              <span className="font-bold text-emerald-400">{formatSec(km.timestampSeconds)}</span>
+                              <span>{km.title}</span>
+                              <span className="text-[9px] text-zinc-400 font-bold bg-zinc-800 px-1 rounded">0.5x Play</span>
+                            </div>
+                            <div className="w-1.5 h-1.5 bg-zinc-900 rotate-45 border-r border-b border-zinc-700 -mt-1" />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Legend */}
+                {feedback && (
+                  <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 pt-1">
+                    <span>{formatSec(currentTime)}</span>
+                    <div className="flex items-center gap-3">
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> Critical Flaw</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" /> Tactical Warning</span>
+                      <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400" /> Key Moment</span>
+                    </div>
+                    <span>{formatSec(duration)}</span>
+                  </div>
+                )}
               </div>
 
               {/* Player Controls */}
@@ -1018,25 +1239,41 @@ export const SparringVideoUploader: React.FC = () => {
                 {feedback.flaws.map((flaw) => (
                   <div
                     key={flaw.id}
-                    onClick={() => seekToTimestamp(flaw.timestampSeconds)}
+                    onClick={() => seekWithSlowMo(flaw.timestampSeconds)}
                     className="p-3.5 rounded-2xl border border-zinc-800 bg-zinc-950/70 hover:border-red-500/60 cursor-pointer transition-all flex flex-col gap-2"
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-red-400 font-mono font-bold text-[11px]">
-                          {formatSec(flaw.timestampSeconds)}
-                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            seekWithSlowMo(flaw.timestampSeconds);
+                          }}
+                          className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 hover:border-red-500 text-red-400 font-mono font-bold text-[11px] flex items-center gap-1 transition-colors"
+                          title="Click to seek in 0.5x slow motion"
+                        >
+                          <span>{formatSec(flaw.timestampSeconds)}</span>
+                          <span className="text-[9px] text-zinc-500 font-normal">0.5x</span>
+                        </button>
                         <span className="font-bold text-xs text-white font-mono">
                           {flaw.title}
                         </span>
                       </div>
-                      <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
-                        flaw.severity === 'critical'
-                          ? 'bg-red-950/80 border-red-800 text-red-300'
-                          : 'bg-amber-950/80 border-amber-800 text-amber-300'
-                      }`}>
-                        {flaw.severity}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {flaw.phase && (
+                          <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-400">
+                            {flaw.phase}
+                          </span>
+                        )}
+                        <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
+                          flaw.severity === 'critical'
+                            ? 'bg-red-950/80 border-red-800 text-red-300'
+                            : 'bg-amber-950/80 border-amber-800 text-amber-300'
+                        }`}>
+                          {flaw.severity}
+                        </span>
+                      </div>
                     </div>
 
                     <p className="text-[11px] text-zinc-400 leading-relaxed">

@@ -2,12 +2,12 @@
 
 import React from 'react';
 import { useCampStore } from '@/lib/store';
-import { getUrineStatus } from '@/lib/utils';
+import { getUrineStatus, getLocalDateString } from '@/lib/utils';
 import { Droplet, Plus, Sparkles, AlertCircle, Check } from 'lucide-react';
 
 export const HydrationTracker: React.FC = () => {
   const { selectedFighterId, hydrationLogs, updateHydrationLog } = useCampStore();
-  const today = new Date().toISOString().split('T')[0];
+  const today = getLocalDateString();
 
   const log = hydrationLogs.find((h) => h.fighterId === selectedFighterId && h.date === today) || {
     waterIntakeOz: 160,

@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getAnalysisJob, getAllAnalysisJobs, cancelAnalysisJob } from '@/lib/ai/video-jobs';
+import { requireAuth, checkRateLimit, getClientIp, handleApiError } from '@/lib/auth/api-guard';
 
 export async function GET(request: NextRequest) {
+  const auth = requireAuth(request);
+  if (!auth.authorized) return auth.response!;
+
+  const ip = getClientIp(request);
+  if (!checkRateLimit(`jobs_get_${ip}`, 120, 2)) {
+    return NextResponse.json({ error: 'Too many job status requests. Please slow down.' }, { status: 429 });
+  }
+
   try {
     const { searchParams } = new URL(request.url);
     const jobId = searchParams.get('jobId');
@@ -24,15 +33,19 @@ export async function GET(request: NextRequest) {
       jobs,
     });
   } catch (error: any) {
-    console.error('[API: /api/v1/mma/jobs] Error fetching jobs:', error);
-    return NextResponse.json(
-      { error: 'Failed to retrieve background analysis jobs.', details: error?.message },
-      { status: 500 }
-    );
+    return handleApiError('/api/v1/mma/jobs', error, 'Failed to retrieve background analysis jobs.');
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const auth = requireAuth(request, ['coach', 'admin']);
+  if (!auth.authorized) return auth.response!;
+
+  const ip = getClientIp(request);
+  if (!checkRateLimit(`jobs_del_${ip}`, 30, 0.5)) {
+    return NextResponse.json({ error: 'Too many requests. Please slow down.' }, { status: 429 });
+  }
+
   try {
     const { searchParams } = new URL(request.url);
     const jobId = searchParams.get('jobId');
@@ -50,10 +63,6 @@ export async function DELETE(request: NextRequest) {
       cancelledId: jobId,
     });
   } catch (error: any) {
-    console.error('[API: /api/v1/mma/jobs] Error deleting job:', error);
-    return NextResponse.json(
-      { error: 'Failed to cancel job.', details: error?.message },
-      { status: 500 }
-    );
+    return handleApiError('/api/v1/mma/jobs', error, 'Failed to cancel job.');
   }
 }

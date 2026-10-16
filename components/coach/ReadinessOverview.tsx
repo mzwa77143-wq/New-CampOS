@@ -26,6 +26,11 @@ import { BodyPart } from '@/types/camp';
 
 export const ReadinessOverview: React.FC = () => {
   const { selectedFighterId, fighters, checkIns, trainingSessions } = useCampStore();
+  const [hasMounted, setHasMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setHasMounted(true);
+  }, []);
   const fighter = fighters.find((f) => f.id === selectedFighterId) || fighters[0];
 
   const latestCheckIn = checkIns.find((ci) => ci.fighterId === selectedFighterId) || {
@@ -239,28 +244,34 @@ export const ReadinessOverview: React.FC = () => {
           </div>
 
           <div className="h-44 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={volumeData} margin={{ top: 10, right: 5, left: -25, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                <XAxis dataKey="day" stroke="#71717a" fontSize={10} tickLine={false} />
-                <YAxis stroke="#71717a" fontSize={10} tickLine={false} />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#09090b', borderColor: '#27272a', borderRadius: '8px', fontSize: '11px' }}
-                  formatter={(val: any, name: string) => [
-                    `${val} ${name === 'volumeRounds' ? 'Rounds' : ''}`, 
-                    name === 'volumeRounds' ? 'Training Volume' : name
-                  ]}
-                />
-                <Bar dataKey="volumeRounds" radius={[4, 4, 0, 0]}>
-                  {volumeData.map((entry, index) => (
-                    <Cell 
-                      key={`cell-${index}`} 
-                      fill={entry.day === 'Today' ? '#ef4444' : entry.volumeRounds > 22 ? '#f59e0b' : '#3f3f46'} 
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+            {hasMounted ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={volumeData} margin={{ top: 10, right: 5, left: -25, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                  <XAxis dataKey="day" stroke="#71717a" fontSize={10} tickLine={false} />
+                  <YAxis stroke="#71717a" fontSize={10} tickLine={false} />
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#09090b', borderColor: '#27272a', borderRadius: '8px', fontSize: '11px' }}
+                    formatter={(val: any, name: string) => [
+                      `${val} ${name === 'volumeRounds' ? 'Rounds' : ''}`, 
+                      name === 'volumeRounds' ? 'Training Volume' : name
+                    ]}
+                  />
+                  <Bar dataKey="volumeRounds" radius={[4, 4, 0, 0]}>
+                    {volumeData.map((entry, index) => (
+                      <Cell 
+                        key={`cell-${index}`} 
+                        fill={entry.day === 'Today' ? '#ef4444' : entry.volumeRounds > 22 ? '#f59e0b' : '#3f3f46'} 
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full w-full flex items-center justify-center bg-zinc-950/40 rounded-xl border border-zinc-900 animate-pulse">
+                <span className="text-xs font-mono text-zinc-500">Loading training volume telemetry...</span>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between text-[10px] text-zinc-500 pt-2 border-t border-zinc-800">

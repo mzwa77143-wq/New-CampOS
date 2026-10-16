@@ -1,7 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getUploadedVideos, deleteUploadedVideo, getUploadedVideoById } from '@/lib/db/video-db';
+import { getUploadedVideos, deleteUploadedVideo } from '@/lib/db/video-db';
+import { requireAuth, checkRateLimit, getClientIp, handleApiError } from '@/lib/auth/api-guard';
 
 export async function GET(request: NextRequest) {
+  const auth = requireAuth(request);
+  if (!auth.authorized) return auth.response!;
+
+  const ip = getClientIp(request);
+  if (!checkRateLimit(`videos_get_${ip}`, 60, 1)) {
+    return NextResponse.json({ error: 'Too many requests. Please slow down.' }, { status: 429 });
+  }
+
   try {
     const { searchParams } = new URL(request.url);
     const fighterId = searchParams.get('fighterId') || undefined;
@@ -15,15 +24,19 @@ export async function GET(request: NextRequest) {
       videos,
     });
   } catch (error: any) {
-    console.error('[API: /api/v1/mma/videos] Error listing uploaded videos:', error);
-    return NextResponse.json(
-      { error: 'Failed to retrieve uploaded videos from database.', details: error?.message },
-      { status: 500 }
-    );
+    return handleApiError('/api/v1/mma/videos', error, 'Failed to retrieve uploaded videos from database.');
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const auth = requireAuth(request, ['coach', 'admin']);
+  if (!auth.authorized) return auth.response!;
+
+  const ip = getClientIp(request);
+  if (!checkRateLimit(`videos_del_${ip}`, 20, 0.5)) {
+    return NextResponse.json({ error: 'Too many requests. Please slow down.' }, { status: 429 });
+  }
+
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get('id');
@@ -43,10 +56,6 @@ export async function DELETE(request: NextRequest) {
       deletedId: id,
     });
   } catch (error: any) {
-    console.error('[API: /api/v1/mma/videos] Error deleting video:', error);
-    return NextResponse.json(
-      { error: 'Failed to delete video from database.', details: error?.message },
-      { status: 500 }
-    );
+    return handleApiError('/api/v1/mma/videos', error, 'Failed to delete video from database.');
   }
 }

@@ -8,6 +8,7 @@ import {
   SparringInsightMatch 
 } from '@/types/video-search';
 import { generateEmbedding, cosineSimilarity, VECTOR_DIMENSION } from './embeddings';
+import frameworkPoints from '@/data/mma_technical_framework_points.json';
 
 export const COLLECTION_NAME = 'mma_technical_framework';
 export const SPARRING_INSIGHTS_COLLECTION = 'sparring_insights';
@@ -424,6 +425,24 @@ class MMAVectorSearchService {
         });
       } catch (e) {}
 
+      // Ensure payload indexes exist on mma_technical_framework for strict mode filtering
+      for (const field of ['range', 'phase', 'discipline', 'concept', 'movementType']) {
+        try {
+          await this.client.createPayloadIndex(COLLECTION_NAME, {
+            field_name: field,
+            field_schema: 'keyword',
+            wait: true,
+          });
+        } catch (e) {}
+      }
+      try {
+        await this.client.createPayloadIndex(COLLECTION_NAME, {
+          field_name: 'biomechanicalData.postureAngleDeg',
+          field_schema: 'float',
+          wait: true,
+        });
+      } catch (e) {}
+
       // 3. Upsert techniques to Qdrant Cloud
       const techniquePoints = this.indexedTechniques.map((tech) => ({
         id: toQdrantId(tech.id),
@@ -447,7 +466,14 @@ class MMAVectorSearchService {
         },
       }));
 
-      await this.client.upsert(COLLECTION_NAME, { points: techniquePoints });
+      // Upsert rich tactical framework points
+      const frameworkUpserts = frameworkPoints.map((item) => ({
+        id: item.id,
+        vector: generateEmbedding(item.payload.text_to_embed),
+        payload: item.payload,
+      }));
+
+      await this.client.upsert(COLLECTION_NAME, { points: [...techniquePoints, ...frameworkUpserts] });
 
       // 4. Upsert seed insights to Qdrant Cloud
       const insightPoints = Array.from(this.indexedInsights.values()).map((ins) => ({

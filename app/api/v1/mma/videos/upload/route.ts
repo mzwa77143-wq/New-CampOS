@@ -3,8 +3,18 @@ import fs from 'fs/promises';
 import path from 'path';
 import { getSupabaseClient } from '@/lib/supabase';
 import { saveUploadedVideo, UploadedVideoRecord } from '@/lib/db/video-db';
+import { requireAuth, checkRateLimit, getClientIp, handleApiError } from '@/lib/auth/api-guard';
+import { validateVideoUpload } from '@/lib/validation/api-schemas';
 
 export async function POST(request: NextRequest) {
+  const auth = requireAuth(request);
+  if (!auth.authorized) return auth.response!;
+
+  const ip = getClientIp(request);
+  if (!checkRateLimit(`upload_${ip}`, 10, 0.2)) {
+    return NextResponse.json({ error: 'Upload rate limit exceeded. Please wait before uploading again.' }, { status: 429 });
+  }
+
   const startTime = Date.now();
   console.log('───────────────────────────────────────────────────────');
   console.log('[API: /api/v1/mma/videos/upload] Received video upload request at', new Date().toISOString());
@@ -18,20 +28,23 @@ export async function POST(request: NextRequest) {
     const intensity = (formData.get('intensity') as string) || 'Championship Hard';
     const durationSeconds = parseFloat((formData.get('durationSeconds') as string) || '30');
 
-    if (!file) {
-      console.warn('[API: /api/v1/mma/videos/upload] 400 Bad Request: Missing "file" in form data.');
+    // B6: Validate upload size and MIME type before reading buffer
+    const validation = validateVideoUpload(file);
+    if (!validation.isValid) {
+      console.warn('[API: /api/v1/mma/videos/upload] 400 Bad Request:', validation.error);
       return NextResponse.json(
-        { error: 'No video file provided in form data.' },
-        { status: 400 }
+        { error: validation.error },
+        { status: file && file.size > 200 * 1024 * 1024 ? 413 : 400 }
       );
     }
 
-    const fileSizeBytes = file.size;
-    const mimeType = file.type || 'video/mp4';
-    const rawFileName = file.name || 'sparring_video.mp4';
+    const validFile = file!;
+    const fileSizeBytes = validFile.size;
+    const mimeType = validFile.type || 'video/mp4';
+    const rawFileName = validFile.name || 'sparring_video.mp4';
     const sanitizedFileName = rawFileName.replace(/[^a-zA-Z0-9._-]/g, '_');
     const videoId = `vid_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const bytes = await file.arrayBuffer();
+    const bytes = await validFile.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
     console.log('[API: /api/v1/mma/videos/upload] Processing upload payload:', {
@@ -54,12 +67,23 @@ export async function POST(request: NextRequest) {
       try {
         console.log('[API: /api/v1/mma/videos/upload] Attempting upload to Supabase Storage bucket "sparring-videos"...');
         const supabasePath = `${fighterId}/${videoId}-${sanitizedFileName}`;
-        const { data: uploadData, error: uploadError } = await client.storage
+
+        const uploadTimeout = new Promise<{ data: null; error: Error }>((_, reject) =>
+          setTimeout(() => reject(new Error('Supabase storage upload timed out after 15000ms')), 15000)
+        );
+
+        // N14: upsert: false prevents silent overwrites on collision
+        const uploadPromise = client.storage
           .from('sparring-videos')
           .upload(supabasePath, buffer, {
             contentType: mimeType,
-            upsert: true,
+            upsert: false,
           });
+
+        const { data: uploadData, error: uploadError } = (await Promise.race([
+          uploadPromise,
+          uploadTimeout,
+        ])) as any;
 
         if (!uploadError && uploadData) {
           const { data: publicUrlData } = client.storage
@@ -129,10 +153,6 @@ export async function POST(request: NextRequest) {
   } catch (error: any) {
     const elapsed = Date.now() - startTime;
     console.error(`[API: /api/v1/mma/videos/upload] Error uploading video after ${elapsed}ms:`, error);
-    console.log('───────────────────────────────────────────────────────');
-    return NextResponse.json(
-      { error: 'Failed to upload video to database.', details: error?.message || 'Internal server error' },
-      { status: 500 }
-    );
+    return handleApiError('/api/v1/mma/videos/upload', error, 'Failed to upload video to database.');
   }
 }

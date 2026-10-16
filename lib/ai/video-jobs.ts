@@ -1,6 +1,16 @@
 import fs from 'fs';
 import path from 'path';
-import { SparringUploadMetadata, SparringAnalysisResponse } from '@/types/sparring-analysis';
+import { 
+  SparringUploadMetadata, 
+  SparringAnalysisResponse,
+  TacticalSequence,
+  BiomechanicalMetric,
+  AgenticInsight,
+  ActionItem,
+  BiomechanicalFlaw,
+  KeyMoment,
+  PrescribedDrill
+} from '@/types/sparring-analysis';
 import { analyzeSparringWithGemini } from './gemini-service';
 import { persistSparringSession } from '@/lib/supabase';
 import { mmaVectorSearchService } from '@/lib/vector/qdrant-service';
@@ -32,8 +42,11 @@ export interface AnalysisJob {
 const DATA_DIR = path.join(process.cwd(), 'data');
 const JOBS_FILE = path.join(DATA_DIR, 'analysis_jobs.json');
 
-// In-memory jobs registry
+// In-memory jobs registry with bounded size
 const jobsRegistry: Map<string, AnalysisJob> = new Map();
+const MAX_JOBS_CAP = 50;
+let persistTimeout: NodeJS.Timeout | null = null;
+let lastPersistTime = 0;
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -41,13 +54,60 @@ function ensureDataDir(): void {
   }
 }
 
-function persistJobsToDisk(): void {
+function pruneJobs(): void {
+  if (jobsRegistry.size <= MAX_JOBS_CAP) return;
+  const jobsArray = Array.from(jobsRegistry.values());
+  // Sort oldest first
+  jobsArray.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  
+  // Prune completed or failed jobs first
+  for (const job of jobsArray) {
+    if (jobsRegistry.size <= MAX_JOBS_CAP) break;
+    if (job.status === 'completed' || job.status === 'failed') {
+      jobsRegistry.delete(job.jobId);
+    }
+  }
+
+  // If still over cap, prune oldest
+  while (jobsRegistry.size > MAX_JOBS_CAP) {
+    const oldestKey = jobsRegistry.keys().next().value;
+    if (oldestKey) jobsRegistry.delete(oldestKey);
+    else break;
+  }
+}
+
+function flushJobsToDisk(): void {
   try {
     ensureDataDir();
+    pruneJobs();
     const list = Array.from(jobsRegistry.values());
-    fs.writeFileSync(JOBS_FILE, JSON.stringify(list, null, 2), 'utf8');
+    const tmpFile = `${JOBS_FILE}.tmp.${Date.now()}`;
+    fs.writeFileSync(tmpFile, JSON.stringify(list, null, 2), 'utf8');
+    fs.renameSync(tmpFile, JOBS_FILE);
+    lastPersistTime = Date.now();
   } catch (e) {
     console.warn('[Video Jobs] Notice writing jobs file to disk:', e);
+  }
+}
+
+function persistJobsToDisk(immediate = false): void {
+  if (immediate) {
+    if (persistTimeout) {
+      clearTimeout(persistTimeout);
+      persistTimeout = null;
+    }
+    flushJobsToDisk();
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastPersistTime >= 1000) {
+    flushJobsToDisk();
+  } else if (!persistTimeout) {
+    persistTimeout = setTimeout(() => {
+      persistTimeout = null;
+      flushJobsToDisk();
+    }, 1000);
   }
 }
 
@@ -84,7 +144,7 @@ function getFighterName(id: string): string {
 export function createAnalysisJob(params: {
   metadata: SparringUploadMetadata;
   durationSeconds: number;
-  frames?: string[];
+  frames?: Array<string | { timestampSeconds: number; base64: string }>;
 }): AnalysisJob {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   const now = new Date().toISOString();
@@ -159,13 +219,17 @@ export async function runBackgroundAnalysis(
   params: {
     metadata: SparringUploadMetadata;
     durationSeconds: number;
-    frames?: string[];
+    frames?: Array<string | { timestampSeconds: number; base64: string }>;
   }
 ): Promise<void> {
   const job = jobsRegistry.get(jobId);
   if (!job) return;
 
   const updateJob = (status: JobStatus, progress: number, stage: string) => {
+    if (!jobsRegistry.has(jobId)) {
+      console.log(`[Video Jobs: Cancelled Worker] Aborting worker for ${jobId}`);
+      throw new Error('JOB_CANCELLED');
+    }
     job.status = status;
     job.progress = progress;
     job.stage = stage;
@@ -180,24 +244,85 @@ export async function runBackgroundAnalysis(
     updateJob('extracting_telemetry', 20, 'Normalizing frame resolutions and calculating joint angular kinematics...');
     await new Promise((r) => setTimeout(r, 600));
 
-    // Stage 2: Multimodal Gemini AI Vision Analysis
-    updateJob('gemini_vision', 45, 'Streaming visual keypoint telemetry to Gemini Multimodal Combat Intelligence...');
-    const feedback: SparringAnalysisResponse = await analyzeSparringWithGemini(
-      params.metadata,
-      params.durationSeconds,
-      params.frames
-    );
+    if (!jobsRegistry.has(jobId)) return;
+
+    // Stage 2: Splicing into 30-Second Progressive Temporal Chunks
+    const totalDuration = params.durationSeconds || 30;
+    const CHUNK_SIZE = 30;
+    const numChunks = Math.max(1, Math.ceil(totalDuration / CHUNK_SIZE));
+
+    console.log(`[Video Jobs: Multi-Chunk Pipeline] [${jobId}] Processing ${totalDuration}s video spliced into ${numChunks} progressive chunks of ~${CHUNK_SIZE}s each.`);
+
+    let feedback: SparringAnalysisResponse;
+
+    if (numChunks === 1) {
+      updateJob('gemini_vision', 45, 'Streaming visual keypoint telemetry to Gemini Multimodal Combat Intelligence...');
+      feedback = await analyzeSparringWithGemini(
+        params.metadata,
+        totalDuration,
+        params.frames
+      );
+    } else {
+      const chunkResponses: SparringAnalysisResponse[] = [];
+
+      for (let c = 0; c < numChunks; c++) {
+        if (!jobsRegistry.has(jobId)) return;
+
+        const chunkStart = c * CHUNK_SIZE;
+        const chunkEnd = Math.min(totalDuration, (c + 1) * CHUNK_SIZE);
+        const chunkLength = chunkEnd - chunkStart;
+
+        // Filter frames that fall into this chunk's window
+        const chunkFrames = (params.frames || []).filter((f) => {
+          if (typeof f === 'string') return true;
+          return f.timestampSeconds >= chunkStart && f.timestampSeconds <= chunkEnd;
+        });
+
+        const startMinSec = `${Math.floor(chunkStart / 60)}:${Math.floor(chunkStart % 60).toString().padStart(2, '0')}`;
+        const endMinSec = `${Math.floor(chunkEnd / 60)}:${Math.floor(chunkEnd % 60).toString().padStart(2, '0')}`;
+
+        const chunkProgress = 20 + Math.round(((c + 0.5) / numChunks) * 50);
+        updateJob(
+          'gemini_vision',
+          chunkProgress,
+          `[Chunk ${c + 1}/${numChunks}] Progressively analyzing ${startMinSec} - ${endMinSec} with Gemini 3.6 Flash...`
+        );
+
+        const chunkResp = await analyzeSparringWithGemini(
+          params.metadata,
+          chunkLength,
+          chunkFrames,
+          {
+            chunkIndex: c + 1,
+            totalChunks: numChunks,
+            chunkStartSeconds: chunkStart,
+            chunkEndSeconds: chunkEnd,
+            fullVideoDurationSeconds: totalDuration,
+          }
+        );
+
+        chunkResponses.push(chunkResp);
+      }
+
+      updateJob('persisting_database', 73, 'Synthesizing spliced chunk analytics into cohesive full-round debrief...');
+      feedback = synthesizeChunkResponses(chunkResponses, params.metadata, totalDuration);
+    }
+
+    if (!jobsRegistry.has(jobId)) return;
 
     // Stage 3: Relational Persistence in Supabase & Local Database
     updateJob('persisting_database', 75, 'Persisting fight camp debrief and tactical sequences into relational database...');
     const persistResult = await persistSparringSession(feedback);
     feedback.persistedToSupabase = persistResult.persistedToSupabase;
 
+    if (!jobsRegistry.has(jobId)) return;
+
     // Stage 4: Qdrant Vector Indexing for Semantic MMA Search
     updateJob('vector_indexing', 90, 'Vectorizing tactical insights into Qdrant Cloud collection "sparring_insights"...');
     if (feedback.insights && feedback.insights.length > 0) {
       try {
         for (const ins of feedback.insights) {
+          if (!jobsRegistry.has(jobId)) return;
           const semanticText = `${ins.title} ${ins.category} ${ins.observation} ${ins.rootCause} ${ins.correction}`;
           const vector = generateEmbedding(semanticText);
 
@@ -223,6 +348,8 @@ export async function runBackgroundAnalysis(
       }
     }
 
+    if (!jobsRegistry.has(jobId)) return;
+
     // Stage 5: Completed
     job.status = 'completed';
     job.progress = 100;
@@ -236,6 +363,10 @@ export async function runBackgroundAnalysis(
 
     console.log(`[Video Jobs: Success] [${jobId}] Pipeline completed successfully. Overall score: ${feedback.overallScore}, Grade: ${feedback.grade}`);
   } catch (error: any) {
+    if (error?.message === 'JOB_CANCELLED' || !jobsRegistry.has(jobId)) {
+      console.log(`[Video Jobs: Worker Cancelled Exit] ${jobId}`);
+      return;
+    }
     console.error(`[Video Jobs: Failure] [${jobId}] Background analysis failed:`, error);
     job.status = 'failed';
     job.stage = 'Analysis failed due to an unexpected error';
@@ -244,4 +375,102 @@ export async function runBackgroundAnalysis(
     jobsRegistry.set(jobId, { ...job });
     persistJobsToDisk();
   }
+}
+
+/**
+ * Synthesizes multiple 30-second progressive chunk analyses into a master debrief
+ */
+function synthesizeChunkResponses(
+  responses: SparringAnalysisResponse[],
+  metadata: SparringUploadMetadata,
+  totalDurationSeconds: number
+): SparringAnalysisResponse {
+  const masterSessionId = `gemini_multichunk_${Date.now()}`;
+  const fighterName = responses[0]?.fighterName || 'Alex Silva';
+
+  // Average overall score across all chunks
+  const avgScore = Math.round(
+    responses.reduce((sum, r) => sum + (r.overallScore || 80), 0) / Math.max(1, responses.length)
+  );
+  const grade: SparringAnalysisResponse['grade'] = avgScore >= 90 ? 'A' : avgScore >= 80 ? 'A-' : avgScore >= 75 ? 'B+' : avgScore >= 70 ? 'B' : avgScore >= 60 ? 'B-' : 'C';
+
+  // Aggregate cumulative fight statistics
+  const totalStrikesLanded = responses.reduce((s, r) => s + (r.stats?.strikesLanded || 0), 0);
+  const totalStrikesAbsorbed = responses.reduce((s, r) => s + (r.stats?.strikesAbsorbed || 0), 0);
+  const avgAccuracy = Math.round(
+    responses.reduce((s, r) => s + (r.stats?.strikeAccuracyPct || 68), 0) / Math.max(1, responses.length)
+  );
+  const avgTdd = Math.round(
+    responses.reduce((s, r) => s + (r.stats?.takedownDefensePct || 85), 0) / Math.max(1, responses.length)
+  );
+  const totalCageControl = responses.reduce((s, r) => s + (r.stats?.cageControlSeconds || 0), 0);
+
+  // Combine and sort chronologically across all chunks
+  const allSequences: TacticalSequence[] = responses
+    .flatMap((r) => r.tacticalSequences || [])
+    .sort((a, b) => a.startTimestampMs - b.startTimestampMs);
+
+  const allMetrics: BiomechanicalMetric[] = responses
+    .flatMap((r) => r.biomechanicalMetrics || [])
+    .sort((a, b) => a.timestampMs - b.timestampMs);
+
+  const allInsights: AgenticInsight[] = responses
+    .flatMap((r) => r.insights || [])
+    .sort((a, b) => a.timestampMs - b.timestampMs);
+
+  const allFlaws: BiomechanicalFlaw[] = responses
+    .flatMap((r) => r.flaws || [])
+    .sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+
+  const allKeyMoments: KeyMoment[] = responses
+    .flatMap((r) => r.keyMoments || [])
+    .sort((a, b) => a.timestampSeconds - b.timestampSeconds);
+
+  // Deduplicate action items & drills by title
+  const seenDrills = new Set<string>();
+  const allDrills: PrescribedDrill[] = [];
+  const allActionItems: ActionItem[] = [];
+
+  for (const r of responses) {
+    for (const d of (r.prescribedDrills || [])) {
+      if (!seenDrills.has(d.title)) {
+        seenDrills.add(d.title);
+        allDrills.push(d);
+      }
+    }
+    for (const a of (r.actionItems || [])) {
+      if (!allActionItems.some((existing) => existing.title === a.title)) {
+        allActionItems.push(a);
+      }
+    }
+  }
+
+  const fightIqSummary = `Full-round progressive analysis across ${responses.length} tactical chunks (${totalDurationSeconds}s total). ${fighterName} established tempo early, navigated mid-round pocket pressure with ${avgAccuracy}% strike accuracy, and absorbed ${totalStrikesAbsorbed} total strikes while logging ${totalCageControl}s of cage control across all fight phases.`;
+
+  return {
+    sessionId: masterSessionId,
+    fighterId: metadata.fighterId || 'f1',
+    fighterName,
+    roundNumber: metadata.roundNumber || 1,
+    roundDurationMs: totalDurationSeconds * 1000,
+    analyzedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    overallScore: avgScore,
+    grade,
+    fightIqSummary,
+    stats: {
+      strikesLanded: totalStrikesLanded,
+      strikesAbsorbed: totalStrikesAbsorbed,
+      strikeAccuracyPct: avgAccuracy,
+      takedownDefensePct: avgTdd,
+      cageControlSeconds: totalCageControl,
+    },
+    tacticalSequences: allSequences,
+    biomechanicalMetrics: allMetrics,
+    insights: allInsights,
+    actionItems: allActionItems,
+    flaws: allFlaws,
+    keyMoments: allKeyMoments,
+    prescribedDrills: allDrills,
+    source: `Gemini Multimodal (${responses.length} Progressive Chunks Spliced)`,
+  };
 }
