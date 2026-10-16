@@ -185,7 +185,7 @@ export async function getUploadedVideos(fighterId?: string): Promise<UploadedVid
       const { data, error } = await query;
       if (!error && data !== null && Array.isArray(data)) {
         console.log(`[Video DB: Supabase] Found ${data.length} records in remote database.`);
-        return data.map((row: any) => ({
+        const records = data.map((row: any) => ({
           id: row.id,
           fighterId: row.fighter_id,
           fileName: row.file_name,
@@ -202,6 +202,24 @@ export async function getUploadedVideos(fighterId?: string): Promise<UploadedVid
           thumbnailUrl: row.thumbnail_url,
           uploadedAt: row.uploaded_at,
         }));
+
+        // Regenerate fresh signed URLs for Supabase-stored videos (private bucket)
+        for (const record of records) {
+          if (record.storageProvider === 'supabase' && record.storagePath) {
+            try {
+              const { data: signedUrlData, error: signedUrlError } = await client.storage
+                .from('sparring-videos')
+                .createSignedUrl(record.storagePath, 60 * 60 * 24 * 7); // 7-day expiry
+              if (!signedUrlError && signedUrlData?.signedUrl) {
+                record.videoUrl = signedUrlData.signedUrl;
+              }
+            } catch {
+              // Keep the existing URL as fallback
+            }
+          }
+        }
+
+        return records;
       }
     } catch (e: any) {
       console.warn('[Video DB] Supabase retrieval notice, falling back to local store:', e?.message);

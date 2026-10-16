@@ -86,15 +86,18 @@ export async function POST(request: NextRequest) {
         ])) as any;
 
         if (!uploadError && uploadData) {
-          const { data: publicUrlData } = client.storage
+          // Private bucket: use signed URLs instead of public URLs
+          const { data: signedUrlData, error: signedUrlError } = await client.storage
             .from('sparring-videos')
-            .getPublicUrl(supabasePath);
+            .createSignedUrl(supabasePath, 60 * 60 * 24 * 7); // 7-day expiry
 
-          if (publicUrlData && publicUrlData.publicUrl) {
+          if (!signedUrlError && signedUrlData?.signedUrl) {
             storageProvider = 'supabase';
             storagePath = supabasePath;
-            videoUrl = publicUrlData.publicUrl;
-            console.log('[API: /api/v1/mma/videos/upload] Successfully uploaded to Supabase Storage. Public URL:', videoUrl);
+            videoUrl = signedUrlData.signedUrl;
+            console.log('[API: /api/v1/mma/videos/upload] Successfully uploaded to Supabase Storage. Signed URL generated (7d expiry).');
+          } else {
+            console.warn('[API: /api/v1/mma/videos/upload] Upload succeeded but signed URL generation failed:', signedUrlError?.message);
           }
         } else {
           console.warn('[API: /api/v1/mma/videos/upload] Supabase bucket notice, falling back to local filesystem storage:', uploadError?.message);
